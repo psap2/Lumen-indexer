@@ -26,6 +26,7 @@ from lumen.config import (
     TYPESCRIPT_EXTENSIONS,
     IndexedChunk,
     IndexedSymbol,
+    LANGUAGE_REGISTRY,
 )
 from lumen.scip_parser.parser import ParsedIndex, ParsedSymbol
 
@@ -34,23 +35,26 @@ logger = logging.getLogger(__name__)
 
 # ── Language mapping ─────────────────────────────────────────────────
 
-#: Map file extension → tree-sitter language identifier
-_EXT_TO_LANGUAGE: Dict[str, str] = {
-    ".ts": "typescript",
-    ".tsx": "typescript",
+#: Map file extension → tree-sitter language identifier.
+#: Built dynamically from the language registry so new languages only
+#: need to be added in config.py.
+_EXT_TO_LANGUAGE: Dict[str, str] = {}
+for _profile in LANGUAGE_REGISTRY.values():
+    for _ext in _profile.extensions:
+        _EXT_TO_LANGUAGE[_ext] = _profile.tree_sitter_lang
+
+# Extras for extensions that map to a *different* tree-sitter grammar
+# than their language registry entry (e.g. .js → "javascript" not "typescript")
+_EXT_TO_LANGUAGE.update({
     ".js": "javascript",
     ".jsx": "javascript",
     ".mjs": "javascript",
     ".cjs": "javascript",
-    ".py": "python",
-    ".rs": "rust",
-    ".go": "go",
-    ".java": "java",
-    ".rb": "ruby",
-    ".cpp": "cpp",
     ".c": "c",
+    ".h": "c",
+    ".pyi": "python",
     ".cs": "c_sharp",
-}
+})
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -200,7 +204,7 @@ def _symbol_metadata_text(symbols: List[IndexedSymbol]) -> str:
 def ingest_repository(
     repo_root: Path,
     parsed_index: Optional[ParsedIndex] = None,
-    extensions: frozenset[str] = TYPESCRIPT_EXTENSIONS,
+    extensions: Optional[frozenset[str]] = None,
     ignore_patterns: Optional[List[str]] = None,
 ) -> tuple[List[TextNode], List[IndexedChunk]]:
     """
@@ -225,6 +229,12 @@ def ingest_repository(
         standardised ``IndexedChunk`` objects for the Friction Scoring
         Engine.
     """
+    if extensions is None:
+        # Default: combine all known extensions from every registered language.
+        extensions = frozenset().union(
+            *(p.extensions for p in LANGUAGE_REGISTRY.values())
+        )
+
     if ignore_patterns is None:
         ignore_patterns = DEFAULT_IGNORE_PATTERNS
 
@@ -236,7 +246,7 @@ def ingest_repository(
 
     for fpath in source_files:
         rel_path = str(fpath.relative_to(repo_root))
-        lang = _EXT_TO_LANGUAGE.get(fpath.suffix.lower(), "typescript")
+        lang = _EXT_TO_LANGUAGE.get(fpath.suffix.lower(), "text")
 
         try:
             text = fpath.read_text(encoding="utf-8", errors="replace")

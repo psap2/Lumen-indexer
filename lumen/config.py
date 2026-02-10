@@ -8,15 +8,121 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional
 
 
-# ── File-type defaults ───────────────────────────────────────────────
+# ── Language registry ────────────────────────────────────────────────
 
-#: Extensions we index per language.  Extend as new SCIP indexers land.
-TYPESCRIPT_EXTENSIONS: frozenset[str] = frozenset(
-    {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
-)
+
+@dataclass(frozen=True)
+class LanguageProfile:
+    """Everything Lumen needs to know about a supported language."""
+
+    #: Human-readable name (used in --language flag).
+    name: str
+    #: File extensions to scan for.
+    extensions: frozenset[str]
+    #: Shell command that produces index.scip when run inside the repo.
+    #: ``None`` means "no SCIP indexer available — skip SCIP".
+    scip_command: Optional[list[str]]
+    #: The tree-sitter grammar identifier used by CodeSplitter.
+    tree_sitter_lang: str
+    #: Extra install instructions shown if the SCIP command is missing.
+    install_hint: str = ""
+
+
+#: Master registry — add new languages here.
+LANGUAGE_REGISTRY: Dict[str, LanguageProfile] = {
+    "typescript": LanguageProfile(
+        name="typescript",
+        extensions=frozenset({".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}),
+        scip_command=[
+            "npx", "--yes", "@sourcegraph/scip-typescript",
+            "index", "--infer-tsconfig",
+        ],
+        tree_sitter_lang="typescript",
+        install_hint="npm install -g @sourcegraph/scip-typescript  (or npx handles it)",
+    ),
+    "python": LanguageProfile(
+        name="python",
+        extensions=frozenset({".py", ".pyi"}),
+        scip_command=[
+            "npx", "--yes", "@sourcegraph/scip-python",
+            "index", ".",
+        ],
+        tree_sitter_lang="python",
+        install_hint="npm install -g @sourcegraph/scip-python  (requires Node >= 16)",
+    ),
+    "go": LanguageProfile(
+        name="go",
+        extensions=frozenset({".go"}),
+        scip_command=["scip-go"],
+        tree_sitter_lang="go",
+        install_hint="go install github.com/sourcegraph/scip-go/cmd/scip-go@latest",
+    ),
+    "rust": LanguageProfile(
+        name="rust",
+        extensions=frozenset({".rs"}),
+        scip_command=["rust-analyzer", "scip", "."],
+        tree_sitter_lang="rust",
+        install_hint="Install rust-analyzer: https://rust-analyzer.github.io/manual.html",
+    ),
+    "java": LanguageProfile(
+        name="java",
+        extensions=frozenset({".java"}),
+        scip_command=["scip-java", "index"],
+        tree_sitter_lang="java",
+        install_hint="cs install scip-java  (requires Coursier: https://get-coursier.io)",
+    ),
+    "ruby": LanguageProfile(
+        name="ruby",
+        extensions=frozenset({".rb", ".rake", ".gemspec"}),
+        scip_command=["scip-ruby"],
+        tree_sitter_lang="ruby",
+        install_hint="gem install scip-ruby  (requires Ruby >= 3.0)",
+    ),
+    "cpp": LanguageProfile(
+        name="cpp",
+        extensions=frozenset({".cpp", ".cc", ".cxx", ".hpp", ".h", ".c"}),
+        scip_command=None,  # No turnkey SCIP indexer yet
+        tree_sitter_lang="cpp",
+        install_hint="No turnkey SCIP indexer for C/C++ yet — indexing proceeds without SCIP.",
+    ),
+}
+
+#: Convenience aliases (so users can type --language js or --language ts)
+_LANGUAGE_ALIASES: Dict[str, str] = {
+    "ts": "typescript",
+    "js": "typescript",
+    "javascript": "typescript",
+    "py": "python",
+    "golang": "go",
+    "rs": "rust",
+    "rb": "ruby",
+    "c": "cpp",
+    "c++": "cpp",
+}
+
+
+def resolve_language(name: str) -> LanguageProfile:
+    """Resolve a user-provided language string to a ``LanguageProfile``."""
+    key = _LANGUAGE_ALIASES.get(name.lower(), name.lower())
+    if key not in LANGUAGE_REGISTRY:
+        supported = ", ".join(sorted(LANGUAGE_REGISTRY.keys()))
+        raise ValueError(
+            f"Unknown language '{name}'. Supported: {supported}"
+        )
+    return LANGUAGE_REGISTRY[key]
+
+
+# ── Legacy aliases (backward-compat) ─────────────────────────────────
+
+TYPESCRIPT_EXTENSIONS: frozenset[str] = LANGUAGE_REGISTRY["typescript"].extensions
+SCIP_TS_CMD: list[str] = list(LANGUAGE_REGISTRY["typescript"].scip_command or [])
+
+# ── General SCIP settings ────────────────────────────────────────────
+
+SCIP_INDEX_FILENAME: str = "index.scip"
 
 #: Files / directories to always skip during repo traversal.
 DEFAULT_IGNORE_PATTERNS: list[str] = [
@@ -30,20 +136,10 @@ DEFAULT_IGNORE_PATTERNS: list[str] = [
     "venv",
     ".tox",
     "coverage",
-]
-
-# ── SCIP ─────────────────────────────────────────────────────────────
-
-#: Name of the SCIP index file produced by scip-typescript.
-SCIP_INDEX_FILENAME: str = "index.scip"
-
-#: npx command to invoke scip-typescript.
-SCIP_TS_CMD: list[str] = [
-    "npx",
-    "--yes",
-    "@sourcegraph/scip-typescript",
-    "index",
-    "--infer-tsconfig",
+    ".lumen",
+    "target",       # Rust/Java
+    "vendor",       # Go
+    "Pods",         # iOS
 ]
 
 # ── Code splitting ───────────────────────────────────────────────────

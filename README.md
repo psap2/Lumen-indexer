@@ -14,8 +14,11 @@ understanding.
 | Tool | Version | Purpose |
 |------|---------|---------|
 | Python | >= 3.10 | Indexing script |
-| Node.js | >= 16 | `scip-typescript` |
-| npm / npx | (bundled) | Running the SCIP indexer |
+| Node.js | >= 16 | `scip-typescript` and `scip-python` (via npx) |
+| npm / npx | (bundled) | Running SCIP indexers |
+
+> **Other languages** (Go, Rust, Java, Ruby) require their own SCIP indexer
+> binaries — see the [Supported languages](#supported-languages) table below.
 
 ### Setup
 
@@ -35,25 +38,32 @@ python -m lumen.proto.compile
 ### Index a repository
 
 ```bash
-# Full pipeline: SCIP → parse → ingest → embed → REPL
-python -m lumen.indexer /path/to/your-ts-project
+# Auto-detect language and index (works for any supported language)
+python -m lumen.indexer /path/to/your-project
+
+# Explicit language
+python -m lumen.indexer /path/to/your-project --language python
+python -m lumen.indexer /path/to/your-project --language typescript
+
+# Multi-language repo (comma-separated)
+python -m lumen.indexer /path/to/your-project --language typescript,python
 
 # Skip SCIP generation (if index.scip already exists)
-python -m lumen.indexer /path/to/your-ts-project --skip-scip
+python -m lumen.indexer /path/to/your-project --skip-scip
 
 # Ask a single question
-python -m lumen.indexer /path/to/your-ts-project \
+python -m lumen.indexer /path/to/your-project \
   --question "What does the authenticateUser function do?"
 
 # Export chunks as JSON for the Friction Scoring Engine
-python -m lumen.indexer /path/to/your-ts-project \
+python -m lumen.indexer /path/to/your-project \
   --export-chunks ./output/chunks.json
 ```
 
 ### Query an existing index
 
 ```bash
-python -m lumen.indexer /path/to/your-ts-project --query-only
+python -m lumen.indexer /path/to/your-project --query-only
 ```
 
 ---
@@ -410,11 +420,32 @@ All tunables are in `lumen/config.py`:
 
 ---
 
+## Supported languages
+
+| Language | `--language` flag | SCIP indexer | Install |
+|----------|------------------|-------------|---------|
+| TypeScript / JavaScript | `typescript` (or `ts`, `js`) | `@sourcegraph/scip-typescript` | Automatic via npx |
+| Python | `python` (or `py`) | `@sourcegraph/scip-python` | Automatic via npx |
+| Go | `go` (or `golang`) | `scip-go` | `go install github.com/sourcegraph/scip-go/cmd/scip-go@latest` |
+| Rust | `rust` (or `rs`) | `rust-analyzer scip` | [rust-analyzer install](https://rust-analyzer.github.io/manual.html) |
+| Java | `java` | `scip-java` | `cs install scip-java` ([Coursier](https://get-coursier.io)) |
+| Ruby | `ruby` (or `rb`) | `scip-ruby` | `gem install scip-ruby` |
+| C / C++ | `cpp` (or `c`, `c++`) | *(none yet)* | Code is still chunked and embedded, just without SCIP symbol data |
+
+**Auto-detection:** If you don't pass `--language`, Lumen scans the repo's file
+extensions and picks the language(s) with the most files. For a repo with both
+`.ts` and `.py` files, it will run both SCIP indexers and merge the results.
+
+**Multi-language:** Pass comma-separated values:
+`--language typescript,python`
+
+---
+
 ## Current limitations
 
-- **TypeScript/JavaScript only** — the SCIP indexer is hardcoded to `scip-typescript`. Python, Go, Rust, etc. would need their own SCIP indexers wired in.
 - **Symbol kinds show as "UnspecifiedKind"** — `scip-typescript` stores kind info in the signature docs string rather than the protobuf `kind` field. The data is there, just in a different place.
 - **No incremental indexing** — every run rebuilds the full index. For large repos, this can be slow.
+- **SCIP indexer availability** — Go, Rust, Java, and Ruby SCIP indexers must be installed separately (see table above). If they're not on PATH, Lumen logs a warning and continues without SCIP enrichment for that language.
 
 ---
 

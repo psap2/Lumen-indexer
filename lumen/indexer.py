@@ -4,16 +4,24 @@ Lumen — Repository Indexing Service.
 
 CLI entry-point that orchestrates the full pipeline:
 
-    1. Run the SCIP indexer (scip-typescript) against a local repo.
-    2. Parse the resulting ``index.scip`` protobuf.
-    3. Walk the repo, split code, and enrich chunks with SCIP symbols.
-    4. Embed and persist to ChromaDB.
-    5. (Optional) Run an interactive query REPL.
+    1. Detect (or accept) the target language(s).
+    2. Run the appropriate SCIP indexer to generate ``index.scip``.
+    3. Parse the resulting protobuf.
+    4. Walk the repo, split code, and enrich chunks with SCIP symbols.
+    5. Embed and persist to ChromaDB.
+    6. (Optional) Run an interactive query REPL.
 
 Usage
 ─────
-    # Full index + query
+    # Auto-detect language and index
     python -m lumen.indexer /path/to/repo
+
+    # Explicit language
+    python -m lumen.indexer /path/to/repo --language python
+    python -m lumen.indexer /path/to/repo --language typescript
+
+    # Multi-language repo (comma-separated)
+    python -m lumen.indexer /path/to/repo --language typescript,python
 
     # Skip SCIP generation (if index.scip already exists)
     python -m lumen.indexer /path/to/repo --skip-scip
@@ -32,15 +40,18 @@ import json
 import logging
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 from lumen.config import (
     CHROMA_COLLECTION,
     CHROMA_PERSIST_DIR,
+    DEFAULT_IGNORE_PATTERNS,
+    LANGUAGE_REGISTRY,
     SCIP_INDEX_FILENAME,
-    SCIP_TS_CMD,
-    TYPESCRIPT_EXTENSIONS,
+    LanguageProfile,
+    resolve_language,
 )
 
 logger = logging.getLogger("lumen")
@@ -62,49 +73,107 @@ def _ensure_proto_compiled() -> None:
     compile_proto()
 
 
+# ── Language auto-detection ──────────────────────────────────────────
+
+
+def _should_ignore(path: Path) -> bool:
+    return any(ig in path.parts for ig in DEFAULT_IGNORE_PATTERNS)
+
+
+def detect_languages(repo_root: Path) -> List[LanguageProfile]:
+    """
+    Scan the repo's file extensions and return the matching
+    ``LanguageProfile``(s), ordered by file count (most files first).
+
+    Only returns languages that are in our ``LANGUAGE_REGISTRY``.
+    """
+    # Build a reverse map:  extension → language key
+    ext_to_lang: Dict[str, str] = {}
+    for lang_key, profile in LANGUAGE_REGISTRY.items():
+        for ext in profile.extensions:
+            ext_to_lang[ext] = lang_key
+
+    # Count extensions
+    lang_counts: Counter[str] = Counter()
+    for p in repo_root.rglob("*"):
+        if not p.is_file() or _should_ignore(p):
+            continue
+        ext = p.suffix.lower()
+        lang_key = ext_to_lang.get(ext)
+        if lang_key:
+            lang_counts[lang_key] += 1
+
+    if not lang_counts:
+        logger.warning("No recognised source files found in %s", repo_root)
+        return []
+
+    # Return profiles ordered by file count
+    profiles = []
+    for lang_key, count in lang_counts.most_common():
+        profile = LANGUAGE_REGISTRY[lang_key]
+        logger.info("  Detected: %-12s (%d files)", profile.name, count)
+        profiles.append(profile)
+
+    return profiles
+
+
 # ── Step 1: SCIP indexer execution ───────────────────────────────────
 
 
-def run_scip_indexer(repo_root: Path) -> Path:
+def run_scip_indexer(
+    repo_root: Path,
+    profile: LanguageProfile,
+    project_name: Optional[str] = None,
+) -> Optional[Path]:
     """
-    Invoke ``scip-typescript`` and return the path to the generated
-    ``index.scip`` file.
+    Invoke the SCIP indexer for *profile* and return the path to the
+    generated ``index.scip``, or ``None`` if no SCIP indexer is available.
+    """
+    if profile.scip_command is None:
+        logger.info(
+            "No SCIP indexer for %s. %s",
+            profile.name,
+            profile.install_hint,
+        )
+        return None
 
-    Raises
-    ------
-    RuntimeError
-        If the indexer process exits with a non-zero code.
-    FileNotFoundError
-        If the output file was not created.
-    """
     output_path = repo_root / SCIP_INDEX_FILENAME
-    logger.info("Running SCIP indexer in %s …", repo_root)
-    logger.info("  Command: %s", " ".join(SCIP_TS_CMD))
+
+    # Build the command — some indexers need extra flags.
+    cmd = list(profile.scip_command)
+
+    # scip-python needs --project-name
+    if profile.name == "python":
+        name = project_name or repo_root.name
+        cmd.extend(["--project-name", name])
+
+    logger.info("Running SCIP indexer (%s) in %s …", profile.name, repo_root)
+    logger.info("  Command: %s", " ".join(cmd))
 
     try:
         result = subprocess.run(
-            SCIP_TS_CMD,
+            cmd,
             cwd=str(repo_root),
             capture_output=True,
             text=True,
             timeout=300,
         )
     except FileNotFoundError:
+        tool = cmd[0]
         raise RuntimeError(
-            "npx not found.  Make sure Node.js (>= 16) is on your PATH.\n"
-            "  brew install node   # macOS\n"
-            "  sudo apt install nodejs npm   # Debian/Ubuntu"
+            f"'{tool}' not found on PATH.\n"
+            f"  Install hint: {profile.install_hint}"
         ) from None
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
         raise RuntimeError(
-            f"scip-typescript exited with code {result.returncode}.\n"
+            f"SCIP indexer ({profile.name}) exited with code {result.returncode}.\n"
             f"stderr:\n{stderr}"
         )
 
     if result.stdout.strip():
-        logger.debug("scip-typescript stdout:\n%s", result.stdout.strip())
+        logger.debug("SCIP stdout:\n%s", result.stdout.strip())
 
     if not output_path.exists():
         raise FileNotFoundError(
@@ -125,16 +194,38 @@ def parse_scip(scip_path: Path):
     return parse_scip_index(scip_path)
 
 
+def _merge_parsed_indexes(indexes):
+    """Merge multiple ParsedIndex objects into one."""
+    from lumen.scip_parser.parser import ParsedIndex
+
+    if len(indexes) == 1:
+        return indexes[0]
+
+    merged = ParsedIndex()
+    for idx in indexes:
+        merged.documents.extend(idx.documents)
+        merged.external_symbols.extend(idx.external_symbols)
+
+    merged.build_lookup_tables()
+    logger.info(
+        "Merged %d SCIP indexes → %d documents, %d symbols",
+        len(indexes),
+        len(merged.documents),
+        len(merged.symbol_table),
+    )
+    return merged
+
+
 # ── Step 3: Ingest ───────────────────────────────────────────────────
 
 
-def ingest(repo_root: Path, parsed_index):
+def ingest(repo_root: Path, parsed_index, extensions: frozenset[str]):
     from lumen.ingestion.code_ingestor import ingest_repository
 
     nodes, chunks = ingest_repository(
         repo_root,
         parsed_index=parsed_index,
-        extensions=TYPESCRIPT_EXTENSIONS,
+        extensions=extensions,
     )
     return nodes, chunks
 
@@ -193,22 +284,35 @@ def run_repl(persist_dir: str, collection_name: str) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    supported = ", ".join(sorted(LANGUAGE_REGISTRY.keys()))
+
     p = argparse.ArgumentParser(
         prog="lumen.indexer",
         description="Lumen Repository Indexing Service — SCIP + LlamaIndex",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python -m lumen.indexer ./my-ts-project\n"
-            "  python -m lumen.indexer ./my-ts-project --skip-scip\n"
-            "  python -m lumen.indexer ./my-ts-project --query-only\n"
-            '  python -m lumen.indexer ./my-ts-project --question "What does parseConfig do?"'
+            "  python -m lumen.indexer ./my-project                        # auto-detect language\n"
+            "  python -m lumen.indexer ./my-project --language python       # explicit language\n"
+            "  python -m lumen.indexer ./my-project --language typescript,python  # multi-language\n"
+            "  python -m lumen.indexer ./my-project --skip-scip\n"
+            "  python -m lumen.indexer ./my-project --query-only\n"
+            '  python -m lumen.indexer ./my-project -q "What does parseConfig do?"'
         ),
     )
     p.add_argument(
         "repo_path",
         type=str,
         help="Path to the local repository to index.",
+    )
+    p.add_argument(
+        "--language", "-l",
+        type=str,
+        default="auto",
+        help=(
+            f"Language(s) to index. Use 'auto' to detect from file extensions, "
+            f"or specify one or more (comma-separated). Supported: {supported}"
+        ),
     )
     p.add_argument(
         "--skip-scip",
@@ -283,38 +387,88 @@ def main(argv: Optional[list[str]] = None) -> None:
             run_repl(persist_dir, collection)
         return
 
+    # ── Resolve language(s) ──────────────────────────────────────
+    if args.language.lower() == "auto":
+        logger.info("Auto-detecting language(s) in %s …", repo_root)
+        profiles = detect_languages(repo_root)
+        if not profiles:
+            logger.error(
+                "Could not detect any supported language. "
+                "Use --language to specify one explicitly."
+            )
+            sys.exit(1)
+    else:
+        # Parse comma-separated list: --language typescript,python
+        raw_langs = [s.strip() for s in args.language.split(",") if s.strip()]
+        try:
+            profiles = [resolve_language(lang) for lang in raw_langs]
+        except ValueError as exc:
+            logger.error("%s", exc)
+            sys.exit(1)
+
+    lang_names = [p.name for p in profiles]
+    logger.info("Languages to index: %s", ", ".join(lang_names))
+
     # ── Ensure proto bindings exist ──────────────────────────────
     _ensure_proto_compiled()
 
-    # ── Step 1: SCIP indexer ─────────────────────────────────────
+    # ── Step 1: SCIP indexer(s) ──────────────────────────────────
+    #   For multi-language repos we run each indexer in sequence.
+    #   Each produces its own index.scip.  We parse each one and
+    #   merge the results.
+    parsed_indexes = []
     scip_path = repo_root / SCIP_INDEX_FILENAME
-    if not args.skip_scip:
-        try:
-            scip_path = run_scip_indexer(repo_root)
-        except (RuntimeError, FileNotFoundError) as exc:
-            logger.error("SCIP indexer failed: %s", exc)
-            logger.info(
-                "Continuing without SCIP data. "
-                "Chunks will still be indexed but without symbol enrichment."
-            )
-            scip_path = None  # type: ignore[assignment]
 
-    # ── Step 2: Parse SCIP ───────────────────────────────────────
-    parsed_index = None
-    if scip_path and scip_path.exists():
-        logger.info("Parsing SCIP index: %s", scip_path)
-        parsed_index = parse_scip(scip_path)
-        logger.info(
-            "  → %d documents, %d symbols",
-            len(parsed_index.documents),
-            len(parsed_index.symbol_table),
-        )
+    if not args.skip_scip:
+        for profile in profiles:
+            try:
+                result_path = run_scip_indexer(
+                    repo_root, profile, project_name=repo_root.name,
+                )
+                if result_path and result_path.exists():
+                    logger.info("Parsing SCIP index for %s …", profile.name)
+                    parsed = parse_scip(result_path)
+                    logger.info(
+                        "  → %d documents, %d symbols",
+                        len(parsed.documents),
+                        len(parsed.symbol_table),
+                    )
+                    parsed_indexes.append(parsed)
+            except (RuntimeError, FileNotFoundError) as exc:
+                logger.warning("SCIP indexer failed for %s: %s", profile.name, exc)
+                logger.info("  Continuing without SCIP data for %s.", profile.name)
     else:
-        logger.warning("No SCIP index found — proceeding without symbol data.")
+        # --skip-scip: try to load an existing index.scip
+        if scip_path.exists():
+            logger.info("Parsing existing SCIP index: %s", scip_path)
+            parsed = parse_scip(scip_path)
+            logger.info(
+                "  → %d documents, %d symbols",
+                len(parsed.documents),
+                len(parsed.symbol_table),
+            )
+            parsed_indexes.append(parsed)
+        else:
+            logger.warning("--skip-scip but no index.scip found. Proceeding without SCIP.")
+
+    # Merge SCIP indexes
+    parsed_index = None
+    if parsed_indexes:
+        parsed_index = _merge_parsed_indexes(parsed_indexes)
+    else:
+        logger.warning("No SCIP data available — chunks will lack symbol enrichment.")
 
     # ── Step 3: Ingest ───────────────────────────────────────────
-    logger.info("Ingesting repository: %s", repo_root)
-    nodes, chunks = ingest(repo_root, parsed_index)
+    #   Combine extensions from all target languages.
+    all_extensions: frozenset[str] = frozenset().union(
+        *(p.extensions for p in profiles)
+    )
+    logger.info(
+        "Ingesting repository: %s  (extensions: %s)",
+        repo_root,
+        ", ".join(sorted(all_extensions)),
+    )
+    nodes, chunks = ingest(repo_root, parsed_index, all_extensions)
     logger.info("  → %d enriched code chunks", len(chunks))
 
     # ── Step 3b (optional): Export chunks ────────────────────────
@@ -339,8 +493,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     else:
         print(f"\n{'═' * 60}")
         print("  Lumen indexing complete!")
-        print(f"  Chunks:  {len(chunks)}")
-        print(f"  Storage: {persist_dir}")
+        print(f"  Languages: {', '.join(lang_names)}")
+        print(f"  Chunks:    {len(chunks)}")
+        print(f"  Storage:   {persist_dir}")
         print(f"{'═' * 60}\n")
         run_repl(persist_dir, collection)
 
