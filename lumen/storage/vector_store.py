@@ -27,18 +27,30 @@ from lumen.config import (
 logger = logging.getLogger(__name__)
 
 
+_embedding_initialised = False
+
+
 def _ensure_embedding_model() -> None:
     """
     Configure the global LlamaIndex embedding model.
 
     We use a local HuggingFace model so that indexing works entirely
     offline without an API key.
+
+    NOTE: We must NOT read ``Settings.embed_model`` before setting it,
+    because LlamaIndex lazily resolves the default (OpenAI) on first
+    access, which throws if ``llama-index-embeddings-openai`` is not
+    installed.  Instead we use a module-level flag.
     """
-    if Settings.embed_model is None or str(Settings.embed_model) == "default":
-        logger.info("Loading embedding model: %s", EMBEDDING_MODEL)
-        Settings.embed_model = HuggingFaceEmbedding(
-            model_name=EMBEDDING_MODEL,
-        )
+    global _embedding_initialised
+    if _embedding_initialised:
+        return
+
+    logger.info("Loading embedding model: %s", EMBEDDING_MODEL)
+    Settings.embed_model = HuggingFaceEmbedding(
+        model_name=EMBEDDING_MODEL,
+    )
+    _embedding_initialised = True
 
 
 def get_chroma_client(persist_dir: str = CHROMA_PERSIST_DIR) -> chromadb.ClientAPI:

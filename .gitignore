@@ -1,0 +1,25 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Generated protobuf bindings
+lumen/proto/scip_pb2.py
+lumen/proto/*_pb2.py
+lumen/proto/*_pb2_grpc.py
+
+# Lumen runtime data
+.lumen/
+output/
+
+# SCIP index (generated per-repo, not part of this project)
+index.scip
+
+# OS
+.DS_Store
+Thumbs.db
