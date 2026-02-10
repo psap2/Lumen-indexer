@@ -1,0 +1,25 @@
+# Lumen — Repository Indexing Service
+# ────────────────────────────────────
+
+# Core framework
+llama-index-core>=0.11.0
+llama-index-vector-stores-chroma>=0.2.0
+llama-index-embeddings-huggingface>=0.3.0
+llama-index-readers-file>=0.2.0
+
+# Vector store
+chromadb>=0.5.0
+
+# Embeddings (pulled transitively, pinned for reproducibility)
+sentence-transformers>=3.0.0
+
+# SCIP protobuf parsing
+protobuf>=5.27.0
+grpcio-tools>=1.60.0
+
+# Code splitting (tree-sitter, optional but recommended)
+tree-sitter>=0.21.0
+tree-sitter-languages>=1.10.0
+
+# Utilities
+tqdm>=4.66.0

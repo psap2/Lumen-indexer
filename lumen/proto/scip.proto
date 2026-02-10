@@ -1,0 +1,293 @@
+// SCIP (Source Code Intelligence Protocol) — Sourcegraph
+// https://github.com/sourcegraph/scip
+//
+// Vendored from upstream for local protobuf compilation.
+// Only fields required by Lumen's indexing pipeline are documented here;
+// see the upstream repo for the full specification.
+
+syntax = "proto3";
+
+package scip;
+
+option go_package = "github.com/sourcegraph/scip/bindings/go/scip/";
+
+// ─── Top-level index ────────────────────────────────────────────────
+
+message Index {
+  Metadata metadata = 1;
+  repeated Document documents = 2;
+  repeated SymbolInformation external_symbols = 3;
+}
+
+message Metadata {
+  ProtocolVersion version = 1;
+  ToolInfo tool_info = 2;
+  string project_root = 3;
+  TextEncoding text_document_encoding = 4;
+}
+
+enum ProtocolVersion {
+  UnspecifiedProtocolVersion = 0;
+}
+
+enum TextEncoding {
+  UnspecifiedTextEncoding = 0;
+  UTF8 = 1;
+  UTF16 = 2;
+}
+
+message ToolInfo {
+  string name = 1;
+  string version = 2;
+  repeated string arguments = 3;
+}
+
+// ─── Document ───────────────────────────────────────────────────────
+
+message Document {
+  string language = 4;
+  string relative_path = 1;
+  repeated Occurrence occurrences = 2;
+  repeated SymbolInformation symbols = 3;
+  string text = 5;
+  PositionEncoding position_encoding = 6;
+}
+
+enum PositionEncoding {
+  UnspecifiedPositionEncoding = 0;
+  UTF8CodeUnitOffsetFromLineStart = 1;
+  UTF16CodeUnitOffsetFromLineStart = 2;
+  UTF32CodeUnitOffsetFromLineStart = 3;
+}
+
+// ─── Symbols & Relationships ────────────────────────────────────────
+
+message SymbolInformation {
+  string symbol = 1;
+  repeated string documentation = 3;
+  repeated Relationship relationships = 4;
+  Kind kind = 5;
+
+  enum Kind {
+    UnspecifiedKind = 0;
+    AbstractMethod = 66;
+    Accessor = 72;
+    Array = 1;
+    Assertion = 2;
+    AssociatedType = 3;
+    Attribute = 4;
+    Axiom = 5;
+    Boolean = 6;
+    Class = 7;
+    Concept = 86;
+    Constant = 8;
+    Constructor = 9;
+    Contract = 62;
+    DataFamily = 10;
+    Delegate = 73;
+    Enum = 11;
+    EnumMember = 12;
+    Error = 63;
+    Event = 13;
+    Extension = 84;
+    Fact = 14;
+    Field = 15;
+    File = 16;
+    Function = 17;
+    Getter = 18;
+    Grammar = 19;
+    Instance = 20;
+    Interface = 21;
+    Key = 22;
+    Lang = 23;
+    Lemma = 24;
+    Library = 64;
+    Macro = 25;
+    Method = 26;
+    MethodAlias = 74;
+    MethodReceiver = 27;
+    MethodSpecification = 67;
+    Message = 28;
+    Mixin = 85;
+    Modifier = 65;
+    Module = 29;
+    Namespace = 30;
+    Null = 31;
+    Number = 32;
+    Object = 33;
+    Operator = 34;
+    Package = 35;
+    PackageObject = 36;
+    Parameter = 37;
+    ParameterLabel = 38;
+    Pattern = 39;
+    Predicate = 40;
+    Property = 41;
+    Protocol = 42;
+    ProtocolMethod = 68;
+    PureVirtualMethod = 69;
+    Quasiquoter = 43;
+    SelfParameter = 44;
+    Setter = 45;
+    Signature = 46;
+    SingletonClass = 75;
+    SingletonMethod = 76;
+    StaticDataMember = 77;
+    StaticEvent = 78;
+    StaticField = 79;
+    StaticMethod = 80;
+    StaticProperty = 81;
+    StaticVariable = 82;
+    String = 48;
+    Struct = 49;
+    Subscript = 47;
+    Tactic = 50;
+    Theorem = 51;
+    ThisParameter = 52;
+    Trait = 53;
+    TraitMethod = 70;
+    Type = 54;
+    TypeAlias = 55;
+    TypeClass = 56;
+    TypeClassMethod = 71;
+    TypeFamily = 57;
+    TypeParameter = 58;
+    Union = 59;
+    Value = 60;
+    Variable = 61;
+  }
+
+  string display_name = 6;
+  Document signature_documentation = 7;
+  string enclosing_symbol = 8;
+}
+
+message Relationship {
+  string symbol = 1;
+  bool is_reference = 2;
+  bool is_implementation = 3;
+  bool is_type_definition = 4;
+  bool is_definition = 5;
+}
+
+// ─── Occurrences ────────────────────────────────────────────────────
+
+message Occurrence {
+  repeated int32 range = 1;
+  string symbol = 2;
+  int32 symbol_roles = 3;
+  repeated string override_documentation = 4;
+  SyntaxKind syntax_kind = 5;
+  repeated Diagnostic diagnostics = 6;
+  repeated int32 enclosing_range = 7;
+}
+
+enum SymbolRole {
+  UnspecifiedSymbolRole = 0;
+  Definition = 0x1;
+  Import = 0x2;
+  WriteAccess = 0x4;
+  ReadAccess = 0x8;
+  Generated = 0x10;
+  Test = 0x20;
+  ForwardDefinition = 0x40;
+}
+
+enum SyntaxKind {
+  option allow_alias = true;
+  UnspecifiedSyntaxKind = 0;
+  Comment = 1;
+  PunctuationDelimiter = 2;
+  PunctuationBracket = 3;
+  Keyword = 4;
+  IdentifierKeyword = 4;
+  IdentifierOperator = 5;
+  Identifier = 6;
+  IdentifierBuiltin = 7;
+  IdentifierNull = 8;
+  IdentifierConstant = 9;
+  IdentifierMutableGlobal = 10;
+  IdentifierParameter = 11;
+  IdentifierLocal = 12;
+  IdentifierShadowed = 13;
+  IdentifierNamespace = 14;
+  IdentifierModule = 14;
+  IdentifierFunction = 15;
+  IdentifierFunctionDefinition = 16;
+  IdentifierMacro = 17;
+  IdentifierMacroDefinition = 18;
+  IdentifierType = 19;
+  IdentifierBuiltinType = 20;
+  IdentifierAttribute = 21;
+  RegexEscape = 22;
+  RegexRepeated = 23;
+  RegexWildcard = 24;
+  RegexDelimiter = 25;
+  RegexJoin = 26;
+  StringLiteral = 27;
+  StringLiteralEscape = 28;
+  StringLiteralSpecial = 29;
+  StringLiteralKey = 30;
+  CharacterLiteral = 31;
+  NumericLiteral = 32;
+  BooleanLiteral = 33;
+  Tag = 34;
+  TagAttribute = 35;
+  TagDelimiter = 36;
+}
+
+message Diagnostic {
+  Severity severity = 1;
+  string code = 2;
+  string message = 3;
+  string source = 4;
+  repeated DiagnosticTag tags = 5;
+}
+
+enum Severity {
+  UnspecifiedSeverity = 0;
+  Error = 1;
+  Warning = 2;
+  Information = 3;
+  Hint = 4;
+}
+
+enum DiagnosticTag {
+  UnspecifiedDiagnosticTag = 0;
+  Unnecessary = 1;
+  Deprecated = 2;
+}
+
+// ─── Symbol string grammar helpers ──────────────────────────────────
+
+message Symbol {
+  string scheme = 1;
+  Package package = 2;
+  repeated Descriptor descriptors = 3;
+}
+
+message Package {
+  string manager = 1;
+  string name = 2;
+  string version = 3;
+}
+
+message Descriptor {
+  enum Suffix {
+    option allow_alias = true;
+    UnspecifiedSuffix = 0;
+    Namespace = 1;
+    Package = 1;
+    Type = 2;
+    Term = 3;
+    Method = 4;
+    TypeParameter = 5;
+    Parameter = 6;
+    Meta = 7;
+    Local = 8;
+    Macro = 9;
+  }
+  string name = 1;
+  string disambiguator = 2;
+  Suffix suffix = 3;
+}
