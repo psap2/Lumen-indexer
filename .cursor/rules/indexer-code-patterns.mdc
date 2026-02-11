@@ -1,0 +1,41 @@
+---
+description: Coding patterns and conventions specific to the Lumen indexer Python codebase
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Lumen Indexer — Code Patterns
+
+## Module Responsibilities
+
+| Module | Responsibility | Key rule |
+|--------|---------------|----------|
+| `config.py` | All tunables + output schemas | Never put magic numbers elsewhere |
+| `indexer.py` | CLI orchestrator | Lazy-imports modules to keep startup fast |
+| `scip_parser/parser.py` | Binary protobuf → Python dataclasses | No protobuf types leak past this boundary |
+| `ingestion/code_ingestor.py` | Code splitting + SCIP enrichment | SCIP symbols are prepended to chunk text before embedding |
+| `storage/supabase_store.py` | Supabase pgvector persistence | Never read `Settings.embed_model` before setting it (lazy-init trap) |
+| `query/engine.py` | Semantic retrieval + REPL | Returns `QueryResult` wrappers, not raw LlamaIndex nodes |
+
+## SCIP Kind Resolution
+
+SCIP indexers often leave the protobuf `kind` field as `UnspecifiedKind` (0).
+We infer the real kind with a 3-layer priority in `_resolve_kind()`:
+1. Protobuf `kind` enum (if set)
+2. Pattern-match the `documentation` string (`` ```ts class Foo ``` `` → Class)
+3. Symbol ID suffix (`#` → Type, `().` → Function, `.` → Property)
+
+Never display "UnspecifiedKind" to users if it can be avoided.
+
+## Multi-Language Support
+
+- Languages are registered in `LANGUAGE_REGISTRY` in `config.py`.
+- Auto-detection scans file extensions and returns profiles sorted by file count.
+- Each language has: extensions, SCIP command, tree-sitter grammar, install hint.
+- For multi-language repos, SCIP indexers run sequentially; parsed indexes are merged.
+
+## Embedding Gotcha
+
+LlamaIndex lazily resolves `Settings.embed_model` on first read, defaulting to
+OpenAI (which crashes if not installed). Always set the model via the
+`_embedding_initialised` flag pattern — never read the property before writing it.

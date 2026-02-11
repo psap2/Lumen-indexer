@@ -1,0 +1,63 @@
+---
+description: Lumen Product Lifecycle Autopilot — project vision, architecture, and coding standards
+alwaysApply: true
+---
+
+# Lumen: Product Lifecycle Autopilot
+
+## 1. What Lumen Is
+
+Lumen is an AI-driven product management platform that bridges the gap between
+customer feedback (Slack, Salesforce, Zendesk) and technical implementation
+(GitHub/GitLab repos).
+
+**Ultimate Goal:** Automatically discover friction points, map them to specific
+code logic, and generate technically accurate PRDs/Tech Specs.
+
+**Three core features:**
+- **Feature 1 — Discovery:** Ingest and cluster customer feedback to surface friction themes.
+- **Feature 2 — Technical Understanding:** Index codebases with SCIP + LlamaIndex so the AI understands function definitions, class hierarchies, and cross-language dependencies.
+- **Feature 3 — Automated Assets:** Generate PRDs and Tech Specs that reference exact code symbols, endpoints, and data flows.
+
+When helping build a feature, check which of these three it supports. If a
+proposed feature can't be mapped to a symbolic reference in the codebase,
+flag it as a "technical constraint."
+
+## 2. Current Component: Repository Indexing Service
+
+This repo (`Lumen-indexer`) is the **Feature 2** engine. It:
+1. Runs Sourcegraph SCIP indexers (TypeScript, Python, Go, etc.) to extract every symbol, definition, reference, and relationship.
+2. Parses the SCIP protobuf into Python dataclasses with fast lookup tables.
+3. Splits code into chunks and enriches each chunk with SCIP symbol metadata before embedding.
+4. Stores enriched vectors in Supabase Postgres + pgvector.
+5. Exposes semantic retrieval so downstream engines can ask questions about code.
+
+The standardised output is `IndexedChunk` objects consumed by the **Friction Scoring Engine** downstream.
+
+## 3. Architecture Principles
+
+- **Semantic Precision:** Never just search text. Use SCIP to understand the graph of function definitions, classes, and dependencies. Every chunk must carry its SCIP `Kind` (Function, Class, Method, etc.) — do not lose this metadata during embedding.
+- **Cross-Language Reasoning:** Lumen handles polyglot monorepos. Logic defined in Python must be linkable to consumption in TypeScript and vice versa.
+- **Layered Traceability:** Support tracing from an API endpoint (FastAPI/Express) down to the database model (SQLAlchemy/Prisma).
+- **Scalability:** Design indexing for high-volume company data. Use pgvector for production semantic retrieval. Indexing should be asynchronous and non-blocking for the main UI.
+
+## 4. Tech Stack
+
+| Layer | Tool |
+|-------|------|
+| Symbol extraction | Sourcegraph SCIP (scip-typescript, scip-python, scip-go, etc.) |
+| RAG pipeline | LlamaIndex (CodeSplitter + custom SCIP metadata enrichment) |
+| Embeddings | HuggingFace `BAAI/bge-small-en-v1.5` (local dev), upgradeable |
+| Vector store | Supabase Postgres + pgvector |
+| Orchestration (future) | LangChain / LangGraph for Friction Engines |
+| Task queue (future) | Redis |
+| Protobuf parsing | `grpcio-tools` compiling `scip.proto` → `scip_pb2.py` |
+
+## 5. Coding Standards
+
+- Python 3.10+, type hints everywhere, `from __future__ import annotations`.
+- All tunables in `lumen/config.py` — no magic numbers in business logic.
+- Dataclasses for domain objects; no protobuf types leak beyond `scip_parser/`.
+- Tree-sitter is optional — always provide a fallback path.
+- Embedding model must work offline (no API key required for local dev).
+- `IndexedChunk.to_dict()` is the canonical output format for downstream consumers.
