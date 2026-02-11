@@ -20,6 +20,9 @@ output/
 # SCIP index (generated per-repo, not part of this project)
 index.scip
 
+# Environment secrets
+.env
+
 # OS
 .DS_Store
 Thumbs.db

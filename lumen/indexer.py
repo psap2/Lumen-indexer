@@ -50,6 +50,7 @@ from lumen.config import (
     DEFAULT_IGNORE_PATTERNS,
     LANGUAGE_REGISTRY,
     SCIP_INDEX_FILENAME,
+    STORAGE_BACKEND,
     LanguageProfile,
     resolve_language,
 )
@@ -234,6 +235,7 @@ def ingest(repo_root: Path, parsed_index, extensions: frozenset[str]):
 
 
 def embed_and_persist(nodes, persist_dir: str, collection_name: str):
+    """Embed and persist to ChromaDB (local mode)."""
     from lumen.storage.vector_store import build_index
 
     return build_index(
@@ -241,6 +243,13 @@ def embed_and_persist(nodes, persist_dir: str, collection_name: str):
         persist_dir=persist_dir,
         collection_name=collection_name,
     )
+
+
+def embed_and_persist_supabase(nodes, repo_id=None):
+    """Embed and persist to Supabase pgvector (production mode)."""
+    from lumen.storage.supabase_store import build_index
+
+    return build_index(nodes, repo_id=repo_id)
 
 
 # ── Step 5: Query ────────────────────────────────────────────────────
@@ -278,6 +287,67 @@ def run_repl(persist_dir: str, collection_name: str) -> None:
     from lumen.query.engine import interactive_repl
 
     interactive_repl(persist_dir=persist_dir, collection_name=collection_name)
+
+
+def _query_supabase(question: str) -> None:
+    """Query the Supabase-backed index."""
+    from lumen.storage.supabase_store import load_index
+    from lumen.query.engine import query_index
+
+    index = load_index()
+    if index is None:
+        print("ERROR: No Supabase index available. Run indexing first.")
+        return
+    results = query_index(question, index=index, top_k=5)
+    if not results:
+        print("No results found.")
+        return
+    print(f"\n{'─' * 60}")
+    print(f"Query: {question}")
+    print(f"{'─' * 60}\n")
+    for i, r in enumerate(results, 1):
+        print(f"  Result {i}  {r.summary()}")
+        preview_lines = r.text.splitlines()[:15]
+        for line in preview_lines:
+            print(f"    {line}")
+        if len(r.text.splitlines()) > 15:
+            print("    …")
+        print()
+
+
+def _repl_supabase() -> None:
+    """Interactive REPL backed by Supabase."""
+    from lumen.storage.supabase_store import load_index
+    from lumen.query.engine import query_index
+
+    index = load_index()
+    if index is None:
+        print("ERROR: No Supabase index available. Run indexing first.")
+        return
+
+    print("─" * 60)
+    print("Lumen Query REPL  [Supabase]  (type 'exit' or Ctrl-C to quit)")
+    print("─" * 60)
+
+    while True:
+        try:
+            question = input("\n❯ ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nBye.")
+            break
+        if not question or question.lower() in {"exit", "quit", "q"}:
+            print("Bye.")
+            break
+        results = query_index(question, index=index, top_k=5)
+        if not results:
+            print("  (no results)")
+            continue
+        for i, r in enumerate(results, 1):
+            print(f"\n  ── Result {i} {r.summary()}")
+            preview = "\n".join(r.text.splitlines()[:20])
+            print(f"{preview}")
+            if len(r.text.splitlines()) > 20:
+                print("    …")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────
@@ -381,10 +451,16 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # ── Query-only mode ──────────────────────────────────────────
     if args.query_only:
-        if args.question:
-            run_query(args.question, persist_dir, collection)
+        if STORAGE_BACKEND == "supabase":
+            if args.question:
+                _query_supabase(args.question)
+            else:
+                _repl_supabase()
         else:
-            run_repl(persist_dir, collection)
+            if args.question:
+                run_query(args.question, persist_dir, collection)
+            else:
+                run_repl(persist_dir, collection)
         return
 
     # ── Resolve language(s) ──────────────────────────────────────
@@ -485,19 +561,58 @@ def main(argv: Optional[list[str]] = None) -> None:
         sys.exit(0)
 
     logger.info("Building vector index (%d nodes) …", len(nodes))
-    index = embed_and_persist(nodes, persist_dir, collection)
+
+    if STORAGE_BACKEND == "supabase":
+        # Persist structured data + embeddings to Supabase
+        from lumen.storage.supabase_store import (
+            create_repository,
+            persist_chunks,
+            update_repository_status,
+        )
+
+        repo_id = create_repository(
+            name=repo_root.name,
+            path_or_url=str(repo_root),
+            languages=lang_names,
+        )
+        update_repository_status(repo_id, "indexing")
+
+        try:
+            persist_chunks(repo_id, chunks)
+            index = embed_and_persist_supabase(nodes, repo_id=repo_id)
+            total_symbols = sum(c.symbol_count for c in chunks)
+            update_repository_status(
+                repo_id, "ready",
+                chunk_count=len(chunks),
+                symbol_count=total_symbols,
+            )
+            storage_info = f"Supabase (repo_id={repo_id})"
+        except Exception:
+            update_repository_status(repo_id, "failed", error_message="Embedding failed")
+            raise
+    else:
+        index = embed_and_persist(nodes, persist_dir, collection)
+        storage_info = persist_dir
 
     # ── Step 5: Query ────────────────────────────────────────────
     if args.question:
-        run_query(args.question, persist_dir, collection)
+        if STORAGE_BACKEND == "supabase":
+            _query_supabase(args.question)
+        else:
+            run_query(args.question, persist_dir, collection)
     else:
         print(f"\n{'═' * 60}")
         print("  Lumen indexing complete!")
         print(f"  Languages: {', '.join(lang_names)}")
         print(f"  Chunks:    {len(chunks)}")
-        print(f"  Storage:   {persist_dir}")
+        print(f"  Backend:   {STORAGE_BACKEND}")
+        print(f"  Storage:   {storage_info}")
         print(f"{'═' * 60}\n")
-        run_repl(persist_dir, collection)
+
+        if STORAGE_BACKEND == "supabase":
+            _repl_supabase()
+        else:
+            run_repl(persist_dir, collection)
 
 
 if __name__ == "__main__":

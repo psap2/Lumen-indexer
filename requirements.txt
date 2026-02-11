@@ -7,8 +7,15 @@ llama-index-vector-stores-chroma>=0.2.0
 llama-index-embeddings-huggingface>=0.3.0
 llama-index-readers-file>=0.2.0
 
-# Vector store
+# Vector store — local (ChromaDB)
 chromadb>=0.5.0
+
+# Vector store — production (Supabase pgvector)
+llama-index-vector-stores-postgres>=0.3.0
+psycopg2-binary>=2.9.9
+
+# ORM + database
+sqlalchemy>=2.0.0
 
 # Embeddings (pulled transitively, pinned for reproducibility)
 sentence-transformers>=3.0.0
@@ -20,6 +27,13 @@ grpcio-tools>=1.60.0
 # Code splitting (tree-sitter, optional but recommended)
 tree-sitter>=0.21.0
 tree-sitter-languages>=1.10.0
+
+# API server
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+
+# Environment
+python-dotenv>=1.0.0
 
 # Utilities
 tqdm>=4.66.0

@@ -6,9 +6,19 @@ All tunables live here so the rest of the codebase stays free of magic numbers.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
+
+# Load .env file before reading any os.environ values.
+# This makes STORAGE_BACKEND, DATABASE_URL, etc. available to both
+# the CLI (python -m lumen.indexer) and the API (python -m lumen.api.main).
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv is optional for chroma-only usage
 
 
 # ── Language registry ────────────────────────────────────────────────
@@ -161,13 +171,37 @@ EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
 #: Dimensionality of the embedding model above.
 EMBEDDING_DIM: int = 384
 
-# ── Vector store ─────────────────────────────────────────────────────
+# ── Storage backend ──────────────────────────────────────────────────
+
+#: ``"chroma"`` for local ChromaDB (default),
+#: ``"supabase"`` for Supabase Postgres + pgvector.
+STORAGE_BACKEND: Literal["chroma", "supabase"] = os.environ.get(
+    "STORAGE_BACKEND", "chroma"
+)  # type: ignore[assignment]
+
+# ── ChromaDB (local) ─────────────────────────────────────────────────
 
 #: Default directory for ChromaDB persistent storage.
 CHROMA_PERSIST_DIR: str = ".lumen/chroma_db"
 
 #: ChromaDB collection name used by the indexer.
 CHROMA_COLLECTION: str = "lumen_code_index"
+
+# ── Supabase / Postgres (production) ────────────────────────────────
+
+#: Supabase project URL (used by the REST client, not DB directly).
+SUPABASE_URL: str = os.environ.get("SUPABASE_URL", "")
+
+#: Supabase anonymous/service-role key.
+SUPABASE_KEY: str = os.environ.get("SUPABASE_KEY", "")
+
+#: Full Postgres connection string.
+#: When using Supabase this looks like:
+#:   ``postgresql://postgres:<pw>@db.<project>.supabase.co:5432/postgres``
+DATABASE_URL: str = os.environ.get("DATABASE_URL", "")
+
+#: The Postgres table LlamaIndex will use for pgvector embeddings.
+PG_EMBED_TABLE: str = "code_embeddings"
 
 
 # ── Standardised output schema for the Friction Scoring Engine ───────
