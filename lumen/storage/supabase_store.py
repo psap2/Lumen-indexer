@@ -276,6 +276,176 @@ def delete_repo_data(repo_id: uuid.UUID) -> None:
             logger.info("Deleted repository %s and all related data.", repo_id)
 
 
+# ── Incremental helpers ──────────────────────────────────────────────
+
+
+def find_repository_by_path(path_or_url: str) -> Optional[Dict[str, Any]]:
+    """Look up a repository by its ``path_or_url`` field."""
+    with get_session() as session:
+        repo = (
+            session.query(Repository)
+            .filter(Repository.path_or_url == path_or_url)
+            .order_by(Repository.created_at.desc())
+            .first()
+        )
+        return repo.to_dict() if repo else None
+
+
+def delete_file_data(
+    repo_id: uuid.UUID,
+    file_paths: List[str],
+) -> int:
+    """
+    Delete chunks, symbols, and embeddings that belong to specific files
+    within a repository.  Returns the number of chunks deleted.
+
+    Used during incremental re-indexing to clean up data for modified
+    or deleted files before inserting fresh data.
+    """
+    if not file_paths:
+        return 0
+
+    with get_session() as session:
+        # Collect chunk_ids for these files so we can cascade to embeddings
+        chunk_ids = [
+            row.chunk_id
+            for row in (
+                session.query(CodeChunk.chunk_id)
+                .filter(
+                    CodeChunk.repo_id == repo_id,
+                    CodeChunk.file_path.in_(file_paths),
+                )
+                .all()
+            )
+        ]
+
+        # Delete symbols for these files
+        sym_deleted = (
+            session.query(Symbol)
+            .filter(
+                Symbol.repo_id == repo_id,
+                Symbol.file_path.in_(file_paths),
+            )
+            .delete(synchronize_session="fetch")
+        )
+
+        # Delete embeddings by chunk_id
+        emb_deleted = 0
+        if chunk_ids:
+            emb_deleted = (
+                session.query(CodeEmbedding)
+                .filter(
+                    CodeEmbedding.repo_id == repo_id,
+                    CodeEmbedding.chunk_id.in_(chunk_ids),
+                )
+                .delete(synchronize_session="fetch")
+            )
+
+        # Delete chunks for these files
+        chunk_deleted = (
+            session.query(CodeChunk)
+            .filter(
+                CodeChunk.repo_id == repo_id,
+                CodeChunk.file_path.in_(file_paths),
+            )
+            .delete(synchronize_session="fetch")
+        )
+
+    logger.info(
+        "Deleted stale data for %d files in repo %s: "
+        "%d chunks, %d symbols, %d embeddings",
+        len(file_paths),
+        repo_id,
+        chunk_deleted,
+        sym_deleted,
+        emb_deleted,
+    )
+    return chunk_deleted
+
+
+def persist_chunks_incremental(
+    repo_id: uuid.UUID,
+    chunks: List[IndexedChunk],
+) -> int:
+    """
+    Insert new ``IndexedChunk`` data **without** deleting existing data.
+
+    This is the incremental counterpart to :func:`persist_chunks` which
+    first wipes all chunks for the repo.  Here we only insert the new /
+    modified file chunks (stale data should already have been removed
+    by :func:`delete_file_data`).
+    """
+    with get_session() as session:
+        chunk_rows = []
+        symbol_rows = []
+
+        for chunk in chunks:
+            chunk_rows.append(
+                CodeChunk(
+                    repo_id=repo_id,
+                    chunk_id=chunk.chunk_id,
+                    file_path=chunk.file_path,
+                    language=chunk.language,
+                    code=chunk.code,
+                    line_start=chunk.line_start,
+                    line_end=chunk.line_end,
+                    symbol_count=chunk.symbol_count,
+                    definition_count=chunk.definition_count,
+                    relationship_count=chunk.relationship_count,
+                    complexity_hint=chunk.complexity_hint,
+                )
+            )
+            for sym in chunk.symbols:
+                symbol_rows.append(
+                    Symbol(
+                        repo_id=repo_id,
+                        chunk_id=chunk.chunk_id,
+                        symbol_id=sym.symbol_id,
+                        kind=sym.kind,
+                        display_name=sym.display_name,
+                        documentation=sym.documentation,
+                        file_path=sym.file_path,
+                        line_start=sym.line_start,
+                        line_end=sym.line_end,
+                        relationships=sym.relationships,
+                    )
+                )
+
+        session.bulk_save_objects(chunk_rows)
+        session.bulk_save_objects(symbol_rows)
+
+    logger.info(
+        "Persisted (incremental) %d chunks and %d symbols for repo %s",
+        len(chunk_rows),
+        len(symbol_rows),
+        repo_id,
+    )
+    return len(chunk_rows)
+
+
+def get_repo_totals(repo_id: uuid.UUID) -> tuple[int, int]:
+    """
+    Re-count total chunks and symbols for a repo from the database.
+
+    Returns ``(chunk_count, symbol_count)``.
+    """
+    with get_session() as session:
+        from sqlalchemy import func
+
+        chunk_count = (
+            session.query(func.count(CodeChunk.id))
+            .filter(CodeChunk.repo_id == repo_id)
+            .scalar()
+        ) or 0
+        symbol_count = (
+            session.query(func.count(Symbol.id))
+            .filter(Symbol.repo_id == repo_id)
+            .scalar()
+        ) or 0
+
+    return chunk_count, symbol_count
+
+
 # ── URL parsing helpers ──────────────────────────────────────────────
 # We parse the DATABASE_URL ourselves so we can pass individual params
 # to PGVectorStore.from_params().

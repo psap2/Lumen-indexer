@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from llama_index.core.schema import Document, TextNode
 
@@ -205,6 +205,7 @@ def ingest_repository(
     parsed_index: Optional[ParsedIndex] = None,
     extensions: Optional[frozenset[str]] = None,
     ignore_patterns: Optional[List[str]] = None,
+    file_filter: Optional[Set[str]] = None,
 ) -> tuple[List[TextNode], List[IndexedChunk]]:
     """
     Walk a repository, split source files, and produce LlamaIndex
@@ -220,6 +221,10 @@ def ingest_repository(
         File extensions to include.
     ignore_patterns:
         Directory / file names to skip.
+    file_filter:
+        When provided, only files whose *relative path* is in this set
+        will be ingested.  Used by the incremental indexing pipeline to
+        restrict processing to new and modified files.
 
     Returns
     -------
@@ -238,6 +243,14 @@ def ingest_repository(
         ignore_patterns = DEFAULT_IGNORE_PATTERNS
 
     source_files = _collect_source_files(repo_root, extensions, ignore_patterns)
+
+    # Apply incremental file filter if provided
+    if file_filter is not None:
+        source_files = [
+            f for f in source_files
+            if str(f.relative_to(repo_root)) in file_filter
+        ]
+
     logger.info("Found %d source files in %s", len(source_files), repo_root)
 
     nodes: List[TextNode] = []

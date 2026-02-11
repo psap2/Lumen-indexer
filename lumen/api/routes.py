@@ -60,6 +60,10 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
 
     Returns immediately with a ``repo_id`` and ``status: indexing``.
     The caller can poll ``GET /repos/{repo_id}`` to check progress.
+
+    When ``incremental=True``, the service looks up the most recent
+    index for this repo path and only re-processes changed files.
+    Falls back to a full index if no previous index exists.
     """
     repo_path = Path(req.repo_path).resolve()
     if not repo_path.is_dir():
@@ -67,8 +71,36 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
 
     language = req.language or "auto"
 
-    from lumen.storage.supabase_store import create_repository, update_repository_status
+    from lumen.storage.supabase_store import (
+        create_repository,
+        find_repository_by_path,
+        update_repository_status,
+    )
 
+    # ── Incremental path ──────────────────────────────────────────
+    if req.incremental:
+        existing = find_repository_by_path(str(repo_path))
+        if existing is not None:
+            rid = uuid.UUID(existing["id"])
+            update_repository_status(rid, "indexing")
+            background_tasks.add_task(
+                _run_incremental_pipeline,
+                repo_id=rid,
+                repo_path=repo_path,
+                language=language,
+            )
+            return IndexResponse(
+                repo_id=str(rid),
+                status="indexing",
+                message=(
+                    f"Incremental re-index started for {repo_path.name}. "
+                    f"Poll GET /repos/{rid} for status."
+                ),
+            )
+        # No prior index — fall through to full index
+        logger.info("No prior index for %s — performing full index.", repo_path)
+
+    # ── Full index path ───────────────────────────────────────────
     repo_id = create_repository(
         name=repo_path.name,
         path_or_url=str(repo_path),
@@ -153,6 +185,57 @@ async def list_chunks(
         offset=offset,
         limit=limit,
         total=repo.get("chunk_count", 0),
+    )
+
+
+# ── Incremental re-index ─────────────────────────────────────────────
+
+
+@router.put("/repos/{repo_id}/reindex", response_model=IndexResponse)
+async def reindex_repo(repo_id: str, background_tasks: BackgroundTasks):
+    """
+    Trigger an incremental re-index of an existing repository.
+
+    Only files that have changed since the last index run will be
+    re-processed.  The repo must already have been indexed at least once.
+    """
+    from lumen.storage.supabase_store import get_repository, update_repository_status
+
+    try:
+        uid = uuid.UUID(repo_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid repo_id (must be UUID).")
+
+    repo = get_repository(uid)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="Repository not found.")
+
+    repo_path = Path(repo["path_or_url"])
+    if not repo_path.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Repository path no longer exists on disk: {repo_path}",
+        )
+
+    update_repository_status(uid, "indexing")
+
+    # Determine language from the stored repo record
+    language = ",".join(repo.get("languages", [])) or "auto"
+
+    background_tasks.add_task(
+        _run_incremental_pipeline,
+        repo_id=uid,
+        repo_path=repo_path,
+        language=language,
+    )
+
+    return IndexResponse(
+        repo_id=repo_id,
+        status="indexing",
+        message=(
+            f"Incremental re-index started for {repo_path.name}. "
+            f"Poll GET /repos/{repo_id} for status."
+        ),
     )
 
 
@@ -292,6 +375,15 @@ def _run_indexing_pipeline(
             symbol_count=total_symbols,
         )
 
+        # Save file states so incremental re-index has a baseline
+        from lumen.incremental import detect_file_changes, save_file_states
+
+        initial_changes = detect_file_changes(repo_id, repo_path, all_extensions)
+        chunk_counts: dict[str, int] = {}
+        for c in chunks:
+            chunk_counts[c.file_path] = chunk_counts.get(c.file_path, 0) + 1
+        save_file_states(repo_id, initial_changes, chunk_counts)
+
         # Invalidate query cache so next query picks up new data
         invalidate_index_cache()
 
@@ -306,6 +398,66 @@ def _run_indexing_pipeline(
         logger.error("Background indexing failed: %s\n%s", exc, traceback.format_exc())
         try:
             from lumen.storage.supabase_store import update_repository_status
+            update_repository_status(
+                repo_id, "failed", error_message=str(exc)
+            )
+        except Exception:
+            logger.error("Could not update repo status to 'failed'.")
+
+
+def _run_incremental_pipeline(
+    repo_id: uuid.UUID,
+    repo_path: Path,
+    language: str,
+) -> None:
+    """
+    Execute incremental re-indexing in a background thread.
+
+    Only files that have changed since the last run are re-processed.
+    """
+    import traceback
+
+    from lumen.config import resolve_language
+    from lumen.indexer import detect_languages, incremental_index
+
+    try:
+        logger.info("Background incremental re-index started for %s", repo_path)
+
+        # ── Resolve languages ─────────────────────────────────────
+        if language.lower() == "auto":
+            profiles = detect_languages(repo_path)
+            if not profiles:
+                raise RuntimeError(f"No supported languages detected in {repo_path}")
+        else:
+            raw = [s.strip() for s in language.split(",") if s.strip()]
+            profiles = [resolve_language(lang) for lang in raw]
+
+        # ── Run incremental index ─────────────────────────────────
+        total_chunks, total_symbols = incremental_index(
+            repo_root=repo_path,
+            repo_id=repo_id,
+            profiles=profiles,
+        )
+
+        # Invalidate query cache so next query picks up new data
+        invalidate_index_cache()
+
+        logger.info(
+            "Background incremental re-index complete: %s (%d chunks, %d symbols)",
+            repo_path.name,
+            total_chunks,
+            total_symbols,
+        )
+
+    except Exception as exc:
+        logger.error(
+            "Background incremental re-index failed: %s\n%s",
+            exc,
+            traceback.format_exc(),
+        )
+        try:
+            from lumen.storage.supabase_store import update_repository_status
+
             update_repository_status(
                 repo_id, "failed", error_message=str(exc)
             )

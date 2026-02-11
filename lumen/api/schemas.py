@@ -26,6 +26,13 @@ class IndexRequest(BaseModel):
             "or a comma-separated list like 'typescript,python'."
         ),
     )
+    incremental: bool = Field(
+        False,
+        description=(
+            "When True, only re-index files that changed since the last "
+            "run.  Falls back to a full index if no previous index exists."
+        ),
+    )
 
 
 class QueryRequest(BaseModel):

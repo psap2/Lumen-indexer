@@ -217,13 +217,19 @@ def _merge_parsed_indexes(indexes):
 # ── Step 3: Ingest ───────────────────────────────────────────────────
 
 
-def ingest(repo_root: Path, parsed_index, extensions: frozenset[str]):
+def ingest(
+    repo_root: Path,
+    parsed_index,
+    extensions: frozenset[str],
+    file_filter: Optional[set[str]] = None,
+):
     from lumen.ingestion.code_ingestor import ingest_repository
 
     nodes, chunks = ingest_repository(
         repo_root,
         parsed_index=parsed_index,
         extensions=extensions,
+        file_filter=file_filter,
     )
     return nodes, chunks
 
@@ -302,6 +308,135 @@ def run_repl() -> None:
                 print("    …")
 
 
+# ── Incremental indexing ─────────────────────────────────────────────
+
+
+def incremental_index(
+    repo_root: Path,
+    repo_id,
+    profiles: List[LanguageProfile],
+    skip_scip: bool = False,
+) -> tuple[int, int]:
+    """
+    Re-index a previously indexed repository, processing only files
+    that have been added, modified, or deleted since the last run.
+
+    Returns ``(chunk_count, symbol_count)`` totals after the update.
+    """
+    import uuid as _uuid
+
+    from lumen.incremental import (
+        changed_file_paths,
+        detect_file_changes,
+        get_change_summary,
+        save_file_states,
+        stale_file_paths,
+    )
+    from lumen.storage.supabase_store import (
+        delete_file_data,
+        get_repo_totals,
+        persist_chunks_incremental,
+        update_repository_status,
+    )
+
+    if isinstance(repo_id, str):
+        repo_id = _uuid.UUID(repo_id)
+
+    lang_names = [p.name for p in profiles]
+    all_extensions: frozenset[str] = frozenset().union(
+        *(p.extensions for p in profiles)
+    )
+
+    # ── 1. Detect changes ─────────────────────────────────────────
+    logger.info("Detecting file changes for incremental re-index …")
+    changes = detect_file_changes(repo_id, repo_root, all_extensions)
+    summary = get_change_summary(changes)
+    logger.info("Change summary: %s", summary)
+
+    new_or_modified = changed_file_paths(changes)
+    stale = stale_file_paths(changes)
+
+    if not new_or_modified and not stale:
+        logger.info("Nothing changed — skipping re-index.")
+        return get_repo_totals(repo_id)
+
+    update_repository_status(repo_id, "indexing")
+
+    # ── 2. Run SCIP on full repo (needs full context) ─────────────
+    _ensure_proto_compiled()
+
+    parsed_indexes = []
+    scip_path = repo_root / SCIP_INDEX_FILENAME
+
+    if not skip_scip:
+        for profile in profiles:
+            try:
+                result_path = run_scip_indexer(
+                    repo_root, profile, project_name=repo_root.name,
+                )
+                if result_path and result_path.exists():
+                    parsed = parse_scip(result_path)
+                    parsed_indexes.append(parsed)
+            except (RuntimeError, FileNotFoundError) as exc:
+                logger.warning("SCIP failed for %s: %s", profile.name, exc)
+    else:
+        if scip_path.exists():
+            parsed = parse_scip(scip_path)
+            parsed_indexes.append(parsed)
+
+    parsed_index = None
+    if parsed_indexes:
+        parsed_index = _merge_parsed_indexes(parsed_indexes)
+
+    # ── 3. Delete stale data ────────────────────────────────────────
+    # Clean up ALL non-unchanged files.  "New" files may still have
+    # leftover chunks from a full index that ran before file-state
+    # tracking was introduced, so we delete for new+modified+deleted.
+    all_affected = {c.path for c in changes if c.status != "unchanged"}
+    if all_affected:
+        logger.info("Cleaning up data for %d affected files …", len(all_affected))
+        delete_file_data(repo_id, list(all_affected))
+
+    # ── 4. Ingest only new + modified files ───────────────────────
+    if new_or_modified:
+        logger.info(
+            "Ingesting %d new/modified files …", len(new_or_modified),
+        )
+        nodes, chunks = ingest(
+            repo_root, parsed_index, all_extensions,
+            file_filter=new_or_modified,
+        )
+
+        # ── 5. Persist new structured data + embeddings ───────────
+        if nodes:
+            persist_chunks_incremental(repo_id, chunks)
+            embed_and_persist(nodes, repo_id=repo_id)
+    else:
+        chunks = []
+
+    # ── 6. Update file state tracking ─────────────────────────────
+    chunk_counts: Dict[str, int] = {}
+    for c in chunks:
+        chunk_counts[c.file_path] = chunk_counts.get(c.file_path, 0) + 1
+
+    save_file_states(repo_id, changes, chunk_counts)
+
+    # ── 7. Recount totals and update repo status ──────────────────
+    total_chunks, total_symbols = get_repo_totals(repo_id)
+    update_repository_status(
+        repo_id, "ready",
+        chunk_count=total_chunks,
+        symbol_count=total_symbols,
+    )
+
+    logger.info(
+        "Incremental re-index complete: %d total chunks, %d total symbols",
+        total_chunks,
+        total_symbols,
+    )
+    return total_chunks, total_symbols
+
+
 # ── CLI ──────────────────────────────────────────────────────────────
 
 
@@ -362,6 +497,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Export enriched chunks as JSON (for the Friction Scoring Engine).",
     )
     p.add_argument(
+        "--incremental", "-i",
+        action="store_true",
+        default=False,
+        help=(
+            "Incremental re-index: only process files that have changed "
+            "since the last run.  Requires a prior full index for this repo."
+        ),
+    )
+    p.add_argument(
         "--verbose", "-v",
         action="store_true",
         default=False,
@@ -418,6 +562,45 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # ── Ensure proto bindings exist ──────────────────────────────
     _ensure_proto_compiled()
+
+    # ── Incremental mode ─────────────────────────────────────────
+    if args.incremental:
+        from lumen.storage.supabase_store import find_repository_by_path
+
+        existing = find_repository_by_path(str(repo_root))
+        if existing is None:
+            logger.warning(
+                "No previous index found for %s — falling back to full index.",
+                repo_root,
+            )
+        else:
+            import uuid as _uuid
+
+            repo_id = _uuid.UUID(existing["id"])
+            logger.info(
+                "Incremental re-index of %s (repo_id=%s)", repo_root, repo_id,
+            )
+
+            total_chunks, total_symbols = incremental_index(
+                repo_root,
+                repo_id=repo_id,
+                profiles=profiles,
+                skip_scip=args.skip_scip,
+            )
+
+            if args.question:
+                run_query(args.question)
+            else:
+                print(f"\n{'═' * 60}")
+                print("  Lumen incremental re-index complete!")
+                print(f"  Languages: {', '.join(lang_names)}")
+                print(f"  Chunks:    {total_chunks}")
+                print(f"  Symbols:   {total_symbols}")
+                print(f"  Repo ID:   {repo_id}")
+                print(f"{'═' * 60}\n")
+
+                run_repl()
+            return
 
     # ── Step 1: SCIP indexer(s) ──────────────────────────────────
     parsed_indexes = []
@@ -510,6 +693,21 @@ def main(argv: Optional[list[str]] = None) -> None:
             chunk_count=len(chunks),
             symbol_count=total_symbols,
         )
+
+        # Save file states so incremental re-index has a baseline
+        from lumen.incremental import (
+            detect_file_changes,
+            save_file_states,
+        )
+
+        initial_changes = detect_file_changes(
+            repo_id, repo_root, all_extensions,
+        )
+        chunk_counts: Dict[str, int] = {}
+        for c in chunks:
+            chunk_counts[c.file_path] = chunk_counts.get(c.file_path, 0) + 1
+        save_file_states(repo_id, initial_changes, chunk_counts)
+
     except Exception:
         update_repository_status(repo_id, "failed", error_message="Embedding failed")
         raise

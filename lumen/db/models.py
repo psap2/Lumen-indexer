@@ -78,6 +78,9 @@ class Repository(Base):
     embeddings: Mapped[List["CodeEmbedding"]] = relationship(
         back_populates="repository", cascade="all, delete-orphan"
     )
+    file_states: Mapped[List["FileIndexState"]] = relationship(
+        back_populates="repository", cascade="all, delete-orphan"
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -214,3 +217,42 @@ class CodeEmbedding(Base):
 
     # Relationships
     repository: Mapped["Repository"] = relationship(back_populates="embeddings")
+
+
+# ── File Index State ─────────────────────────────────────────────────
+
+
+class FileIndexState(Base):
+    """
+    Tracks per-file content hashes for incremental indexing.
+
+    On each re-index run the service computes SHA-256 hashes for every
+    source file and compares them against the stored state.  Only files
+    whose hash has changed (or that are new / deleted) are re-processed.
+    """
+
+    __tablename__ = "file_index_state"
+    __table_args__ = (
+        UniqueConstraint("repo_id", "file_path", name="uq_file_state_repo_path"),
+        Index("idx_file_state_repo", "repo_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    repo_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("repositories.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    indexed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    # Relationships
+    repository: Mapped["Repository"] = relationship(back_populates="file_states")
