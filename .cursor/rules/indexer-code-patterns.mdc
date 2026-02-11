@@ -14,7 +14,7 @@ alwaysApply: false
 | `indexer.py` | CLI orchestrator | Lazy-imports modules to keep startup fast |
 | `scip_parser/parser.py` | Binary protobuf → Python dataclasses | No protobuf types leak past this boundary |
 | `ingestion/code_ingestor.py` | Code splitting + SCIP enrichment | SCIP symbols are prepended to chunk text before embedding |
-| `storage/vector_store.py` | ChromaDB persistence | Never read `Settings.embed_model` before setting it (lazy-init trap) |
+| `storage/supabase_store.py` | Supabase pgvector persistence | Never read `Settings.embed_model` before setting it (lazy-init trap) |
 | `query/engine.py` | Semantic retrieval + REPL | Returns `QueryResult` wrappers, not raw LlamaIndex nodes |
 
 ## SCIP Kind Resolution

@@ -6,10 +6,15 @@ All tunables live here so the rest of the codebase stays free of magic numbers.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, List, Optional
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  
 
 # ── Language registry ────────────────────────────────────────────────
 
@@ -115,10 +120,6 @@ def resolve_language(name: str) -> LanguageProfile:
     return LANGUAGE_REGISTRY[key]
 
 
-# ── Legacy aliases (backward-compat) ─────────────────────────────────
-
-TYPESCRIPT_EXTENSIONS: frozenset[str] = LANGUAGE_REGISTRY["typescript"].extensions
-SCIP_TS_CMD: list[str] = list(LANGUAGE_REGISTRY["typescript"].scip_command or [])
 
 # ── General SCIP settings ────────────────────────────────────────────
 
@@ -136,7 +137,6 @@ DEFAULT_IGNORE_PATTERNS: list[str] = [
     "venv",
     ".tox",
     "coverage",
-    ".lumen",
     "target",       # Rust/Java
     "vendor",       # Go
     "Pods",         # iOS
@@ -161,13 +161,21 @@ EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
 #: Dimensionality of the embedding model above.
 EMBEDDING_DIM: int = 384
 
-# ── Vector store ─────────────────────────────────────────────────────
+# ── Supabase / Postgres ──────────────────────────────────────────────
 
-#: Default directory for ChromaDB persistent storage.
-CHROMA_PERSIST_DIR: str = ".lumen/chroma_db"
+#: Supabase project URL (used by the REST client, not DB directly).
+SUPABASE_URL: str = os.environ.get("SUPABASE_URL", "")
 
-#: ChromaDB collection name used by the indexer.
-CHROMA_COLLECTION: str = "lumen_code_index"
+#: Supabase anonymous/service-role key.
+SUPABASE_KEY: str = os.environ.get("SUPABASE_KEY", "")
+
+#: Full Postgres connection string.
+#: When using Supabase this looks like:
+#:   ``postgresql://postgres:<pw>@db.<project>.supabase.co:5432/postgres``
+DATABASE_URL: str = os.environ.get("DATABASE_URL", "")
+
+#: The Postgres table LlamaIndex will use for pgvector embeddings.
+PG_EMBED_TABLE: str = "code_embeddings"
 
 
 # ── Standardised output schema for the Friction Scoring Engine ───────

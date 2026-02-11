@@ -29,7 +29,7 @@ This repo (`Lumen-indexer`) is the **Feature 2** engine. It:
 1. Runs Sourcegraph SCIP indexers (TypeScript, Python, Go, etc.) to extract every symbol, definition, reference, and relationship.
 2. Parses the SCIP protobuf into Python dataclasses with fast lookup tables.
 3. Splits code into chunks and enriches each chunk with SCIP symbol metadata before embedding.
-4. Stores enriched vectors in ChromaDB (local dev) / pgvector (production).
+4. Stores enriched vectors in Supabase Postgres + pgvector.
 5. Exposes semantic retrieval so downstream engines can ask questions about code.
 
 The standardised output is `IndexedChunk` objects consumed by the **Friction Scoring Engine** downstream.
@@ -48,8 +48,7 @@ The standardised output is `IndexedChunk` objects consumed by the **Friction Sco
 | Symbol extraction | Sourcegraph SCIP (scip-typescript, scip-python, scip-go, etc.) |
 | RAG pipeline | LlamaIndex (CodeSplitter + custom SCIP metadata enrichment) |
 | Embeddings | HuggingFace `BAAI/bge-small-en-v1.5` (local dev), upgradeable |
-| Vector store (dev) | ChromaDB |
-| Vector store (prod) | Postgres + pgvector |
+| Vector store | Supabase Postgres + pgvector |
 | Orchestration (future) | LangChain / LangGraph for Friction Engines |
 | Task queue (future) | Redis |
 | Protobuf parsing | `grpcio-tools` compiling `scip.proto` → `scip_pb2.py` |

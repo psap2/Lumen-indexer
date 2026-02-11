@@ -7,15 +7,11 @@ exploration.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import List, Optional
 
 from llama_index.core import VectorStoreIndex
 from llama_index.core.schema import NodeWithScore
-
-from lumen.config import CHROMA_COLLECTION, CHROMA_PERSIST_DIR
-from lumen.storage.vector_store import load_index
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +73,6 @@ class QueryResult:
 def query_index(
     question: str,
     index: Optional[VectorStoreIndex] = None,
-    persist_dir: str = CHROMA_PERSIST_DIR,
-    collection_name: str = CHROMA_COLLECTION,
     top_k: int = 5,
 ) -> List[QueryResult]:
     """
@@ -91,7 +85,7 @@ def query_index(
         *"What does the authenticateUser function do?"*
     index:
         An already-loaded ``VectorStoreIndex``.  If ``None``, the index
-        is loaded from *persist_dir*.
+        is loaded from Supabase.
     top_k:
         Number of results to return.
 
@@ -101,13 +95,11 @@ def query_index(
         Ranked list of code chunks relevant to the question.
     """
     if index is None:
-        index = load_index(persist_dir, collection_name)
+        from lumen.storage.supabase_store import load_index
+
+        index = load_index()
         if index is None:
-            logger.error(
-                "No index found at %s (collection=%s). Run the indexer first.",
-                persist_dir,
-                collection_name,
-            )
+            logger.error("No index available. Run the indexer first.")
             return []
 
     retriever = index.as_retriever(similarity_top_k=top_k)
@@ -118,8 +110,6 @@ def query_index(
 def query_function(
     function_name: str,
     index: Optional[VectorStoreIndex] = None,
-    persist_dir: str = CHROMA_PERSIST_DIR,
-    collection_name: str = CHROMA_COLLECTION,
     top_k: int = 3,
 ) -> List[QueryResult]:
     """
@@ -135,8 +125,6 @@ def query_function(
     return query_index(
         question,
         index=index,
-        persist_dir=persist_dir,
-        collection_name=collection_name,
         top_k=top_k,
     )
 
@@ -144,15 +132,13 @@ def query_function(
 # ── Interactive REPL ─────────────────────────────────────────────────
 
 
-def interactive_repl(
-    persist_dir: str = CHROMA_PERSIST_DIR,
-    collection_name: str = CHROMA_COLLECTION,
-) -> None:
+def interactive_repl() -> None:
     """Launch a minimal interactive query loop."""
-    index = load_index(persist_dir, collection_name)
+    from lumen.storage.supabase_store import load_index
+
+    index = load_index()
     if index is None:
-        print(f"ERROR: No index found at {persist_dir} (collection={collection_name}).")
-        print("Run the indexer first:  python -m lumen.indexer <repo_path>")
+        print("ERROR: No index available. Run the indexer first.")
         return
 
     print("─" * 60)
