@@ -16,6 +16,7 @@ understanding.
 | Python | >= 3.10 | Indexing script |
 | Node.js | >= 16 | `scip-typescript` and `scip-python` (via npx) |
 | npm / npx | (bundled) | Running SCIP indexers |
+| Supabase project | — | Postgres database with pgvector for storage |
 
 > **Other languages** (Go, Rust, Java, Ruby) require their own SCIP indexer
 > binaries — see the [Supported languages](#supported-languages) table below.
@@ -33,6 +34,22 @@ pip install -r requirements.txt
 
 # Compile the SCIP protobuf schema (one-time)
 python -m lumen.proto.compile
+```
+
+### Configure Supabase
+
+1. Create a [Supabase](https://supabase.com/) project (free tier works).
+2. Open the **SQL Editor** in the Supabase dashboard and run the contents of
+   `supabase/migrations/001_init.sql`. This creates the tables (`repositories`,
+   `code_chunks`, `symbols`, `code_embeddings`) and enables the `pgvector`
+   extension.
+3. Copy your credentials into a `.env` file in the project root:
+
+```bash
+# .env
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-service-role-key
+DATABASE_URL=postgresql://postgres:your-password@db.your-project.supabase.co:5432/postgres
 ```
 
 ### Index a repository
@@ -66,6 +83,15 @@ python -m lumen.indexer /path/to/your-project \
 python -m lumen.indexer /path/to/your-project --query-only
 ```
 
+### Run the API server
+
+```bash
+python -m lumen.api.main
+```
+
+The API starts at `http://localhost:8000`. Check `http://localhost:8000/docs`
+for the full Swagger/OpenAPI documentation.
+
 ---
 
 ## How the whole thing works, step by step
@@ -98,15 +124,17 @@ from the `scip.proto` blueprint.
 
 ### Step 1 — Run the SCIP indexer (`indexer.py` → `run_scip_indexer()`)
 
-**File:** `lumen/indexer.py`, line 68
-
-The script shells out (runs a terminal command) inside your target repo:
+The script shells out (runs a terminal command) inside your target repo. For
+TypeScript that command is:
 
 ```
 npx --yes @sourcegraph/scip-typescript index --infer-tsconfig
 ```
 
-This is a Sourcegraph tool that **statically analyses** your TypeScript code —
+For Python it would be `npx --yes @sourcegraph/scip-python index . --project-name your-repo`,
+and so on for other languages.
+
+This is a Sourcegraph tool that **statically analyses** your code —
 similar to how a compiler reads your code, but instead of producing a running
 program, it produces a **map of every symbol** in the codebase. This map is
 saved as `index.scip` inside the target repo.
@@ -126,8 +154,6 @@ symbol intelligence.
 ---
 
 ### Step 2 — Parse the SCIP index (`indexer.py` → `scip_parser/parser.py`)
-
-**File:** `lumen/scip_parser/parser.py`, line 245
 
 Now we have `index.scip` — a binary protobuf file. This step reads that file
 and converts it into Python dataclasses that the rest of our code can work
@@ -173,15 +199,13 @@ ParsedIndex:
 
 ### Step 3 — Ingest: split code + enrich with SCIP (`ingestion/code_ingestor.py`)
 
-**File:** `lumen/ingestion/code_ingestor.py`, line 200
-
 This is where the magic happens — where SCIP intelligence meets LlamaIndex.
 
 **3a. Collect files**
 
 First, it walks the target repo and collects every file matching the target
-extensions (`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`). It skips
-`node_modules/`, `.git/`, `dist/`, `build/`, and other junk directories
+extensions (e.g. `.ts`, `.tsx`, `.js`, `.jsx` for TypeScript, `.py` for Python).
+It skips `node_modules/`, `.git/`, `dist/`, `build/`, and other junk directories
 (configured in `config.py`).
 
 **3b. Split each file into chunks**
@@ -244,12 +268,11 @@ For each chunk, we create:
 
 ---
 
-### Step 4 — Embed and persist to ChromaDB (`storage/vector_store.py`)
-
-**File:** `lumen/storage/vector_store.py`, line 62
+### Step 4 — Embed and persist to Supabase (`storage/supabase_store.py`)
 
 Now we have a list of TextNode objects (e.g. 20 enriched code chunks). This
-step turns them into **vectors** (arrays of 384 numbers) and stores them.
+step turns them into **vectors** (arrays of 384 numbers) and stores everything
+in your Supabase Postgres database.
 
 Here's what happens:
 
@@ -258,27 +281,34 @@ Here's what happens:
    needed. It converts text into a 384-dimensional vector that captures the
    *meaning* of that text.
 
-2. **Create a ChromaDB collection.** ChromaDB is a local vector database that
-   stores embeddings on disk (inside `<your-repo>/.lumen/chroma_db/`). If a
-   previous collection exists, we delete it and rebuild from scratch.
+2. **Create a repository record.** A row is inserted into the `repositories`
+   table with the repo name, path, detected languages, and status `"indexing"`.
+   This gives us a `repo_id` (UUID) that all chunks and symbols link back to.
 
-3. **Build the VectorStoreIndex.** LlamaIndex takes each TextNode, passes its
-   text through the embedding model, gets back a 384-number vector, and stores
-   that vector + the original text + metadata in ChromaDB.
+3. **Persist structured data.** Each `IndexedChunk` and its SCIP symbols are
+   written to the `code_chunks` and `symbols` tables in Postgres. This is
+   relational, queryable data — you can SQL-query it directly.
+
+4. **Build the vector index.** LlamaIndex takes each TextNode, passes its text
+   through the embedding model, gets back a 384-number vector, and stores that
+   vector + the original text + metadata in the `code_embeddings` table via
+   pgvector. This table has an HNSW index for fast similarity search.
+
+5. **Mark the repository as ready.** The `repositories` row is updated to
+   status `"ready"` with the final `chunk_count` and `symbol_count`.
 
 After this step, you have a searchable database where you can find code by
-*meaning*, not just by keyword matching.
+*meaning*, not just by keyword matching. And because it's Postgres, you get
+full SQL access to the structured data alongside the vector search.
 
-**Where does the data live?** Inside the target repo at
-`.lumen/chroma_db/`. So if you indexed
-`~/Desktop/typescript-clean-architecture`, the database is at
-`~/Desktop/typescript-clean-architecture/.lumen/chroma_db/`.
+**Where does the data live?** In your Supabase Postgres database, across four
+tables: `repositories`, `code_chunks`, `symbols`, and `code_embeddings`. You
+can view and query all of them from the Supabase dashboard's Table Editor or
+SQL Editor.
 
 ---
 
 ### Step 5 — Query (`query/engine.py`)
-
-**File:** `lumen/query/engine.py`, line 77
 
 Now the index is built. The script either:
 - Runs a single question (if you used `--question "..."`)
@@ -295,10 +325,11 @@ Here's what happens behind the scenes:
 1. **Embed your question.** The same `bge-small-en-v1.5` model converts your
    question into a 384-dimensional vector.
 
-2. **Cosine similarity search.** ChromaDB compares your question vector against
-   every stored code chunk vector. It measures how "close" each chunk's meaning
-   is to your question using cosine similarity (1.0 = identical meaning,
-   0.0 = completely unrelated).
+2. **Cosine similarity search.** pgvector compares your question vector against
+   every stored code chunk vector in the `code_embeddings` table. It measures
+   how "close" each chunk's meaning is to your question using cosine similarity
+   (1.0 = identical meaning, 0.0 = completely unrelated). The HNSW index makes
+   this fast even with thousands of chunks.
 
 3. **Return top-K results.** The 5 most similar chunks are returned, ranked by
    score.
@@ -318,13 +349,68 @@ that happen to contain the same keywords.
 
 ---
 
+## REST API
+
+The Lumen API exposes the same indexing and query capabilities over HTTP.
+
+Start the server:
+
+```bash
+python -m lumen.api.main
+# → http://localhost:8000
+# → Swagger docs at http://localhost:8000/docs
+```
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/health` | Liveness probe — reports DB connection status |
+| `POST` | `/api/v1/repos/index` | Kick off background indexing of a local repo |
+| `GET` | `/api/v1/repos` | List all indexed repositories |
+| `GET` | `/api/v1/repos/{repo_id}` | Get details for one repository |
+| `GET` | `/api/v1/repos/{repo_id}/chunks` | Paginated list of code chunks (for Friction Scoring Engine) |
+| `POST` | `/api/v1/query` | Semantic search across the indexed codebase |
+
+### Example: index a repo via API
+
+```bash
+curl -X POST http://localhost:8000/api/v1/repos/index \
+  -H "Content-Type: application/json" \
+  -d '{"repo_path": "/Users/you/Desktop/your-project"}'
+```
+
+Response:
+
+```json
+{
+  "repo_id": "a1b2c3d4-...",
+  "status": "indexing",
+  "message": "Indexing started for your-project. Poll GET /repos/a1b2c3d4-... for status."
+}
+```
+
+### Example: query
+
+```bash
+curl -X POST http://localhost:8000/api/v1/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "How does user authentication work?", "top_k": 5}'
+```
+
+---
+
 ## Project structure
 
 ```
 Lumen-indexer/                        ← You run commands from here
 ├── README.md
 ├── requirements.txt
+├── .env                              # Your Supabase credentials (git-ignored)
 ├── .gitignore
+├── supabase/
+│   └── migrations/
+│       └── 001_init.sql              # SQL schema for Postgres tables + pgvector
 └── lumen/                            ← Python package (don't cd into here)
     ├── __init__.py                   # Package root (v0.1.0)
     ├── __main__.py                   # Allows `python -m lumen` shortcut
@@ -339,23 +425,39 @@ Lumen-indexer/                        ← You run commands from here
     ├── ingestion/
     │   └── code_ingestor.py          # Walks repo, splits code, enriches with SCIP symbols
     ├── storage/
-    │   └── vector_store.py           # ChromaDB: build and load vector indexes
-    └── query/
-        └── engine.py                 # Semantic search + interactive REPL
+    │   └── supabase_store.py         # Supabase pgvector: build/load indexes + CRUD
+    ├── db/
+    │   ├── __init__.py               # Package marker
+    │   ├── models.py                 # SQLAlchemy ORM models (repositories, chunks, symbols)
+    │   └── session.py                # Database connection + session management
+    ├── query/
+    │   └── engine.py                 # Semantic search + interactive REPL
+    └── api/
+        ├── __init__.py               # Package marker
+        ├── main.py                   # FastAPI app entry-point + CORS + lifespan
+        ├── routes.py                 # REST endpoint definitions (/api/v1/...)
+        ├── schemas.py                # Pydantic request/response models
+        └── deps.py                   # Shared dependencies (cached query index)
 ```
 
 ### What each file does
 
 | File | One-line purpose |
 |------|-----------------|
-| `config.py` | Every tunable number and the `IndexedChunk`/`IndexedSymbol` data schemas live here |
+| `config.py` | Every tunable number, Supabase credentials, and the `IndexedChunk`/`IndexedSymbol` data schemas live here |
 | `indexer.py` | The conductor — calls each step in order and handles CLI flags |
 | `proto/scip.proto` | The Sourcegraph blueprint that defines what an `index.scip` file contains |
 | `proto/compile.py` | One-time script that generates `scip_pb2.py` from `scip.proto` |
 | `scip_parser/parser.py` | Reads the binary `index.scip`, converts everything into Python dataclasses, builds fast lookup tables |
 | `ingestion/code_ingestor.py` | Walks the repo, splits files into chunks, asks the parser "what symbols are in lines X–Y?", prepends that info to each chunk |
-| `storage/vector_store.py` | Takes the enriched chunks, runs them through the embedding model, stores the vectors in ChromaDB on disk |
-| `query/engine.py` | Takes your question, embeds it with the same model, does a cosine similarity search against ChromaDB, returns the top matches |
+| `storage/supabase_store.py` | Embeds chunks via the local model, stores vectors in pgvector, writes structured data to Postgres |
+| `db/models.py` | SQLAlchemy ORM models mirroring the Postgres schema — `Repository`, `CodeChunk`, `Symbol`, `CodeEmbedding` |
+| `db/session.py` | Manages Postgres connections: engine, session factory, health check |
+| `query/engine.py` | Takes your question, embeds it with the same model, does a cosine similarity search against pgvector, returns the top matches |
+| `api/main.py` | FastAPI app with CORS, lifespan hooks, and uvicorn startup |
+| `api/routes.py` | REST endpoints: health, index, list repos, get repo, list chunks, semantic query |
+| `api/schemas.py` | Pydantic models for request/response validation and OpenAPI docs |
+| `api/deps.py` | Caches the loaded vector index so every API query doesn't reload from Postgres |
 
 ---
 
@@ -376,16 +478,37 @@ Lumen-indexer/                        ← You run commands from here
            ├── prepends [SCIP Symbols] header to each chunk
            └──► produces TextNodes (for embedding) + IndexedChunks (for export)
 
- Step 4    vector_store.py embeds the TextNodes
+ Step 4    supabase_store.py persists everything to Postgres
+           ├── creates a repository record (repo_id)
+           ├── writes chunks + symbols to relational tables
            ├── runs each chunk through bge-small-en-v1.5 (local model)
            ├── gets a 384-number vector per chunk
-           └──► stores vectors + text in ChromaDB (on disk at .lumen/chroma_db/)
+           └──► stores vectors in pgvector (code_embeddings table)
 
  Step 5    engine.py handles your questions
            ├── embeds your question with the same model
-           ├── cosine similarity search against all stored vectors
+           ├── cosine similarity search via pgvector
            └──► returns the 5 closest code chunks, ranked by score
 ```
+
+---
+
+## Database schema
+
+The Supabase Postgres database has four tables:
+
+| Table | Purpose |
+|-------|---------|
+| `repositories` | One row per indexed repo — name, path, languages, status, counts |
+| `code_chunks` | Every code chunk with file path, line range, code text, metrics |
+| `symbols` | SCIP symbols with kind, display name, docs, relationships (JSONB) |
+| `code_embeddings` | 384-dimensional vectors for similarity search (pgvector HNSW index) |
+
+All tables link back to `repositories` via `repo_id` with `ON DELETE CASCADE` —
+deleting a repository automatically cleans up all its chunks, symbols, and
+embeddings.
+
+The full schema is in `supabase/migrations/001_init.sql`.
 
 ---
 
@@ -415,7 +538,7 @@ All tunables are in `lumen/config.py`:
 
 - **Chunk size / overlap** — `CHUNK_LINES` (60), `CHUNK_OVERLAP_LINES` (15), `CHUNK_MAX_CHARS` (3000)
 - **Embedding model** — `EMBEDDING_MODEL` (default: `BAAI/bge-small-en-v1.5`, 384 dimensions, runs locally)
-- **ChromaDB** — `CHROMA_PERSIST_DIR` (`.lumen/chroma_db`), `CHROMA_COLLECTION` (`lumen_code_index`)
+- **Supabase** — `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_KEY`, `PG_EMBED_TABLE` (all from `.env`)
 - **Ignore patterns** — `DEFAULT_IGNORE_PATTERNS` (skips `node_modules`, `.git`, `dist`, `build`, etc.)
 
 ---
@@ -443,9 +566,9 @@ extensions and picks the language(s) with the most files. For a repo with both
 
 ## Current limitations
 
-- **Symbol kinds show as "UnspecifiedKind"** — `scip-typescript` stores kind info in the signature docs string rather than the protobuf `kind` field. The data is there, just in a different place.
 - **No incremental indexing** — every run rebuilds the full index. For large repos, this can be slow.
 - **SCIP indexer availability** — Go, Rust, Java, and Ruby SCIP indexers must be installed separately (see table above). If they're not on PATH, Lumen logs a warning and continues without SCIP enrichment for that language.
+- **Local repos only** — the indexer currently requires a local file path. Remote Git URL support is planned.
 
 ---
 
