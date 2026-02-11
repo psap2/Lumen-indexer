@@ -17,6 +17,7 @@ Design notes
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -209,12 +210,165 @@ def _parse_occurrence(pb2, occ) -> SymbolOccurrence:
     )
 
 
+# ── Kind inference from documentation ────────────────────────────────
+#
+# scip-typescript and scip-python leave the protobuf ``kind`` field at 0
+# (UnspecifiedKind) and instead encode kind information inside the
+# ``documentation`` strings.  The functions below recover the real kind
+# by pattern-matching those strings, with a fallback that inspects the
+# symbol ID's suffix characters.
+
+# Matches the inside of a fenced code block: ```lang CONTENT ```
+_CODE_FENCE_RE = re.compile(r"```\w*\s+(.*?)```", re.DOTALL)
+
+# TypeScript patterns inside the code fence
+_TS_KIND_MAP: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"^\(method\)\s"),          "Method"),
+    (re.compile(r"^\(property\)\s"),        "Property"),
+    (re.compile(r"^\(parameter\)\s"),       "Parameter"),
+    (re.compile(r"^\(enum\s+member\)\s"),   "EnumMember"),
+    (re.compile(r"^class\s"),               "Class"),
+    (re.compile(r"^interface\s"),           "Interface"),
+    (re.compile(r"^enum\s"),                "Enum"),
+    (re.compile(r"^type\s"),                "TypeAlias"),
+    (re.compile(r"^function\s"),            "Function"),
+    (re.compile(r"^constructor\s*\("),      "Constructor"),
+    (re.compile(r"^namespace\s"),           "Namespace"),
+    (re.compile(r"^module\s"),              "Module"),
+    (re.compile(r"^var\s"),                 "Variable"),
+    (re.compile(r"^const\s"),              "Variable"),
+    (re.compile(r"^let\s"),                "Variable"),
+]
+
+# Python patterns
+_PY_KIND_MAP: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"^\(module\)\s"),          "Module"),
+    (re.compile(r"^def\s"),                 "Function"),
+    (re.compile(r"^@\w+.*\ndef\s", re.DOTALL),  "Function"),  # decorated functions
+    (re.compile(r"^class\s"),               "Class"),
+    (re.compile(r"^async\s+def\s"),         "Function"),
+]
+
+
+def _infer_kind_from_docs(documentation: str) -> str:
+    """
+    Attempt to determine the symbol kind by inspecting the documentation
+    string that SCIP indexers produce.
+
+    Returns a human-readable kind name (e.g. ``"Function"``, ``"Class"``)
+    or ``""`` if nothing could be inferred.
+    """
+    if not documentation:
+        return ""
+
+    # ── Check for Python-style unfenced docs: "(module) apps.server.main"
+    stripped = documentation.strip()
+    if stripped.startswith("(module)"):
+        return "Module"
+
+    # ── Extract content from fenced code blocks
+    m = _CODE_FENCE_RE.search(documentation)
+    if not m:
+        return ""
+
+    content = m.group(1).strip()
+
+    # Try TypeScript patterns first
+    for pattern, kind in _TS_KIND_MAP:
+        if pattern.search(content):
+            return kind
+
+    # Try Python patterns
+    for pattern, kind in _PY_KIND_MAP:
+        if pattern.search(content):
+            return kind
+
+    return ""
+
+
+def _infer_kind_from_symbol_id(symbol_id: str) -> str:
+    """
+    Fallback: guess the kind from the SCIP symbol ID's suffix.
+
+    SCIP symbol IDs use suffix characters to indicate the descriptor type:
+      ``#``  → Type (class, interface, enum)
+      ``.``  → Term (property, field, variable, enum member)
+      ``().`` → Method / function
+      ``).``  → (inside parens) Parameter
+    """
+    if not symbol_id:
+        return ""
+
+    sid = symbol_id.rstrip()
+
+    # Local symbols: "local 5" etc.
+    if sid.startswith("local "):
+        return "Variable"
+
+    # Constructor
+    if "`<constructor>`()." in sid:
+        return "Constructor"
+
+    # Parameter: ends with  )  and the part before ) has (paramName
+    if re.search(r"\.\([\w]+\)$", sid):
+        return "Parameter"
+
+    # Method / function: ends with ().
+    if sid.endswith("()."):
+        return "Function"
+
+    # Type: ends with #
+    if sid.endswith("#"):
+        return "Type"
+
+    # Term (property / variable): ends with .
+    if sid.endswith("."):
+        return "Property"
+
+    # Module: ends with /
+    if sid.endswith("/"):
+        return "Module"
+
+    return ""
+
+
+def _resolve_kind(pb2, kind_value: int, documentation: str, symbol_id: str) -> str:
+    """
+    Determine the best symbol kind using all available signals.
+
+    Priority:
+      1. Protobuf ``kind`` field (if set by the indexer)
+      2. Inferred from documentation string
+      3. Inferred from symbol ID suffix
+      4. ``"UnspecifiedKind"`` as last resort
+    """
+    # 1. Check the protobuf enum
+    proto_kind = _kind_name(pb2, kind_value)
+    if proto_kind != "UnspecifiedKind":
+        return proto_kind
+
+    # 2. Infer from docs
+    doc_kind = _infer_kind_from_docs(documentation)
+    if doc_kind:
+        return doc_kind
+
+    # 3. Infer from symbol ID
+    id_kind = _infer_kind_from_symbol_id(symbol_id)
+    if id_kind:
+        return id_kind
+
+    return "UnspecifiedKind"
+
+
 def _parse_symbol(pb2, sym) -> ParsedSymbol:
+    documentation = "\n".join(sym.documentation) if sym.documentation else ""
+    kind = _resolve_kind(pb2, sym.kind, documentation, sym.symbol)
+
     return ParsedSymbol(
         symbol_id=sym.symbol,
-        kind=_kind_name(pb2, sym.kind),
+        kind=kind,
         display_name=sym.display_name,
-        documentation="\n".join(sym.documentation) if sym.documentation else "",
+        documentation=documentation,
         enclosing_symbol=sym.enclosing_symbol,
         relationships=[
             SymbolRelationship(

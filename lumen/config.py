@@ -225,7 +225,7 @@ class IndexedChunk:
         return sum(
             1 for s in self.symbols if s.kind.lower() in {
                 "function", "method", "class", "interface", "type",
-                "constructor", "enum",
+                "typealias", "constructor", "enum", "module", "namespace",
             }
         )
 
