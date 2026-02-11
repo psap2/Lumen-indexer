@@ -23,7 +23,6 @@ from lumen.config import (
     CHUNK_MAX_CHARS,
     CHUNK_OVERLAP_LINES,
     DEFAULT_IGNORE_PATTERNS,
-    TYPESCRIPT_EXTENSIONS,
     IndexedChunk,
     IndexedSymbol,
     LANGUAGE_REGISTRY,
