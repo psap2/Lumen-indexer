@@ -1,8 +1,8 @@
 """
 SQLAlchemy ORM models mirroring the Supabase schema.
 
-These models are used by the Supabase storage backend to read/write
-structured data.  They are NOT used by the ChromaDB backend.
+These models are used by the storage backend to read/write
+structured data to Postgres.
 """
 
 from __future__ import annotations

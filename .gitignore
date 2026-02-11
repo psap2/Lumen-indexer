@@ -14,7 +14,6 @@ lumen/proto/*_pb2.py
 lumen/proto/*_pb2_grpc.py
 
 # Lumen runtime data
-.lumen/
 output/
 
 # SCIP index (generated per-repo, not part of this project)

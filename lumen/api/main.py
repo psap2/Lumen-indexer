@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
     except ImportError:
         pass
 
-    logger.info("Lumen API v%s starting  (storage=%s)", __version__, os.environ.get("STORAGE_BACKEND", "chroma"))
+    logger.info("Lumen API v%s starting  (storage=supabase/pgvector)", __version__)
     yield
     logger.info("Lumen API shutting down.")
 

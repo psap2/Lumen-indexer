@@ -8,7 +8,7 @@ CLI entry-point that orchestrates the full pipeline:
     2. Run the appropriate SCIP indexer to generate ``index.scip``.
     3. Parse the resulting protobuf.
     4. Walk the repo, split code, and enrich chunks with SCIP symbols.
-    5. Embed and persist to ChromaDB.
+    5. Embed and persist to Supabase (Postgres + pgvector).
     6. (Optional) Run an interactive query REPL.
 
 Usage
@@ -45,12 +45,9 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from lumen.config import (
-    CHROMA_COLLECTION,
-    CHROMA_PERSIST_DIR,
     DEFAULT_IGNORE_PATTERNS,
     LANGUAGE_REGISTRY,
     SCIP_INDEX_FILENAME,
-    STORAGE_BACKEND,
     LanguageProfile,
     resolve_language,
 )
@@ -234,19 +231,8 @@ def ingest(repo_root: Path, parsed_index, extensions: frozenset[str]):
 # ── Step 4: Embed + persist ──────────────────────────────────────────
 
 
-def embed_and_persist(nodes, persist_dir: str, collection_name: str):
-    """Embed and persist to ChromaDB (local mode)."""
-    from lumen.storage.vector_store import build_index
-
-    return build_index(
-        nodes,
-        persist_dir=persist_dir,
-        collection_name=collection_name,
-    )
-
-
-def embed_and_persist_supabase(nodes, repo_id=None):
-    """Embed and persist to Supabase pgvector (production mode)."""
+def embed_and_persist(nodes, repo_id=None):
+    """Embed and persist to Supabase pgvector."""
     from lumen.storage.supabase_store import build_index
 
     return build_index(nodes, repo_id=repo_id)
@@ -255,48 +241,14 @@ def embed_and_persist_supabase(nodes, repo_id=None):
 # ── Step 5: Query ────────────────────────────────────────────────────
 
 
-def run_query(question: str, persist_dir: str, collection_name: str) -> None:
-    from lumen.query.engine import query_index
-
-    results = query_index(
-        question,
-        persist_dir=persist_dir,
-        collection_name=collection_name,
-        top_k=5,
-    )
-
-    if not results:
-        print("No results found.")
-        return
-
-    print(f"\n{'─' * 60}")
-    print(f"Query: {question}")
-    print(f"{'─' * 60}\n")
-
-    for i, r in enumerate(results, 1):
-        print(f"  Result {i}  {r.summary()}")
-        preview_lines = r.text.splitlines()[:15]
-        for line in preview_lines:
-            print(f"    {line}")
-        if len(r.text.splitlines()) > 15:
-            print("    …")
-        print()
-
-
-def run_repl(persist_dir: str, collection_name: str) -> None:
-    from lumen.query.engine import interactive_repl
-
-    interactive_repl(persist_dir=persist_dir, collection_name=collection_name)
-
-
-def _query_supabase(question: str) -> None:
+def run_query(question: str) -> None:
     """Query the Supabase-backed index."""
     from lumen.storage.supabase_store import load_index
     from lumen.query.engine import query_index
 
     index = load_index()
     if index is None:
-        print("ERROR: No Supabase index available. Run indexing first.")
+        print("ERROR: No index available. Run indexing first.")
         return
     results = query_index(question, index=index, top_k=5)
     if not results:
@@ -315,18 +267,18 @@ def _query_supabase(question: str) -> None:
         print()
 
 
-def _repl_supabase() -> None:
+def run_repl() -> None:
     """Interactive REPL backed by Supabase."""
     from lumen.storage.supabase_store import load_index
     from lumen.query.engine import query_index
 
     index = load_index()
     if index is None:
-        print("ERROR: No Supabase index available. Run indexing first.")
+        print("ERROR: No index available. Run indexing first.")
         return
 
     print("─" * 60)
-    print("Lumen Query REPL  [Supabase]  (type 'exit' or Ctrl-C to quit)")
+    print("Lumen Query REPL  (type 'exit' or Ctrl-C to quit)")
     print("─" * 60)
 
     while True:
@@ -403,18 +355,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Ask a single question and exit (non-interactive).",
     )
     p.add_argument(
-        "--persist-dir",
-        type=str,
-        default=None,
-        help=f"ChromaDB storage directory (default: <repo>/{CHROMA_PERSIST_DIR}).",
-    )
-    p.add_argument(
-        "--collection",
-        type=str,
-        default=CHROMA_COLLECTION,
-        help=f"ChromaDB collection name (default: {CHROMA_COLLECTION}).",
-    )
-    p.add_argument(
         "--export-chunks",
         type=str,
         default=None,
@@ -446,21 +386,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         logger.error("Repository path does not exist: %s", repo_root)
         sys.exit(1)
 
-    persist_dir = args.persist_dir or str(repo_root / CHROMA_PERSIST_DIR)
-    collection = args.collection
-
     # ── Query-only mode ──────────────────────────────────────────
     if args.query_only:
-        if STORAGE_BACKEND == "supabase":
-            if args.question:
-                _query_supabase(args.question)
-            else:
-                _repl_supabase()
+        if args.question:
+            run_query(args.question)
         else:
-            if args.question:
-                run_query(args.question, persist_dir, collection)
-            else:
-                run_repl(persist_dir, collection)
+            run_repl()
         return
 
     # ── Resolve language(s) ──────────────────────────────────────
@@ -489,9 +420,6 @@ def main(argv: Optional[list[str]] = None) -> None:
     _ensure_proto_compiled()
 
     # ── Step 1: SCIP indexer(s) ──────────────────────────────────
-    #   For multi-language repos we run each indexer in sequence.
-    #   Each produces its own index.scip.  We parse each one and
-    #   merge the results.
     parsed_indexes = []
     scip_path = repo_root / SCIP_INDEX_FILENAME
 
@@ -514,7 +442,6 @@ def main(argv: Optional[list[str]] = None) -> None:
                 logger.warning("SCIP indexer failed for %s: %s", profile.name, exc)
                 logger.info("  Continuing without SCIP data for %s.", profile.name)
     else:
-        # --skip-scip: try to load an existing index.scip
         if scip_path.exists():
             logger.info("Parsing existing SCIP index: %s", scip_path)
             parsed = parse_scip(scip_path)
@@ -535,7 +462,6 @@ def main(argv: Optional[list[str]] = None) -> None:
         logger.warning("No SCIP data available — chunks will lack symbol enrichment.")
 
     # ── Step 3: Ingest ───────────────────────────────────────────
-    #   Combine extensions from all target languages.
     all_extensions: frozenset[str] = frozenset().union(
         *(p.extensions for p in profiles)
     )
@@ -555,64 +481,52 @@ def main(argv: Optional[list[str]] = None) -> None:
             json.dump([c.to_dict() for c in chunks], f, indent=2)
         logger.info("Exported %d chunks to %s", len(chunks), export_path)
 
-    # ── Step 4: Embed + persist ──────────────────────────────────
+    # ── Step 4: Embed + persist to Supabase ──────────────────────
     if not nodes:
         logger.warning("No code chunks to index.  Exiting.")
         sys.exit(0)
 
     logger.info("Building vector index (%d nodes) …", len(nodes))
 
-    if STORAGE_BACKEND == "supabase":
-        # Persist structured data + embeddings to Supabase
-        from lumen.storage.supabase_store import (
-            create_repository,
-            persist_chunks,
-            update_repository_status,
-        )
+    from lumen.storage.supabase_store import (
+        create_repository,
+        persist_chunks,
+        update_repository_status,
+    )
 
-        repo_id = create_repository(
-            name=repo_root.name,
-            path_or_url=str(repo_root),
-            languages=lang_names,
-        )
-        update_repository_status(repo_id, "indexing")
+    repo_id = create_repository(
+        name=repo_root.name,
+        path_or_url=str(repo_root),
+        languages=lang_names,
+    )
+    update_repository_status(repo_id, "indexing")
 
-        try:
-            persist_chunks(repo_id, chunks)
-            index = embed_and_persist_supabase(nodes, repo_id=repo_id)
-            total_symbols = sum(c.symbol_count for c in chunks)
-            update_repository_status(
-                repo_id, "ready",
-                chunk_count=len(chunks),
-                symbol_count=total_symbols,
-            )
-            storage_info = f"Supabase (repo_id={repo_id})"
-        except Exception:
-            update_repository_status(repo_id, "failed", error_message="Embedding failed")
-            raise
-    else:
-        index = embed_and_persist(nodes, persist_dir, collection)
-        storage_info = persist_dir
+    try:
+        persist_chunks(repo_id, chunks)
+        index = embed_and_persist(nodes, repo_id=repo_id)
+        total_symbols = sum(c.symbol_count for c in chunks)
+        update_repository_status(
+            repo_id, "ready",
+            chunk_count=len(chunks),
+            symbol_count=total_symbols,
+        )
+    except Exception:
+        update_repository_status(repo_id, "failed", error_message="Embedding failed")
+        raise
 
     # ── Step 5: Query ────────────────────────────────────────────
     if args.question:
-        if STORAGE_BACKEND == "supabase":
-            _query_supabase(args.question)
-        else:
-            run_query(args.question, persist_dir, collection)
+        run_query(args.question)
     else:
         print(f"\n{'═' * 60}")
         print("  Lumen indexing complete!")
         print(f"  Languages: {', '.join(lang_names)}")
         print(f"  Chunks:    {len(chunks)}")
-        print(f"  Backend:   {STORAGE_BACKEND}")
-        print(f"  Storage:   {storage_info}")
+        print(f"  Repo ID:   {repo_id}")
+        print(f"  Storage:   Supabase (pgvector)")
         print(f"{'═' * 60}\n")
 
-        if STORAGE_BACKEND == "supabase":
-            _repl_supabase()
-        else:
-            run_repl(persist_dir, collection)
+        run_repl()
 
 
 if __name__ == "__main__":

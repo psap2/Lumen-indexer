@@ -26,7 +26,6 @@ from lumen.api.schemas import (
     QueryResultItem,
     RepoResponse,
 )
-from lumen.config import STORAGE_BACKEND
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +38,13 @@ router = APIRouter(prefix="/api/v1")
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
     """Quick liveness / readiness probe."""
-    db_connected = None
-    if STORAGE_BACKEND == "supabase":
-        from lumen.db.session import check_connection
-        db_connected = check_connection()
+    from lumen.db.session import check_connection
+
+    db_connected = check_connection()
 
     return HealthResponse(
         status="ok",
-        storage_backend=STORAGE_BACKEND,
+        storage_backend="supabase",
         db_connected=db_connected,
         version=__version__,
     )
@@ -69,43 +67,27 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
 
     language = req.language or "auto"
 
-    if STORAGE_BACKEND == "supabase":
-        from lumen.storage.supabase_store import create_repository, update_repository_status
+    from lumen.storage.supabase_store import create_repository, update_repository_status
 
-        repo_id = create_repository(
-            name=repo_path.name,
-            path_or_url=str(repo_path),
-            languages=[language],
-        )
-        update_repository_status(repo_id, "indexing")
+    repo_id = create_repository(
+        name=repo_path.name,
+        path_or_url=str(repo_path),
+        languages=[language],
+    )
+    update_repository_status(repo_id, "indexing")
 
-        background_tasks.add_task(
-            _run_indexing_pipeline,
-            repo_id=repo_id,
-            repo_path=repo_path,
-            language=language,
-        )
+    background_tasks.add_task(
+        _run_indexing_pipeline,
+        repo_id=repo_id,
+        repo_path=repo_path,
+        language=language,
+    )
 
-        return IndexResponse(
-            repo_id=str(repo_id),
-            status="indexing",
-            message=f"Indexing started for {repo_path.name}. Poll GET /repos/{repo_id} for status.",
-        )
-    else:
-        # ChromaDB mode — run synchronously (no repo_id tracking).
-        # We still background it so the HTTP response returns quickly.
-        fake_id = str(uuid.uuid4())
-        background_tasks.add_task(
-            _run_indexing_pipeline,
-            repo_id=None,
-            repo_path=repo_path,
-            language=language,
-        )
-        return IndexResponse(
-            repo_id=fake_id,
-            status="indexing",
-            message=f"Indexing started for {repo_path.name} (ChromaDB mode).",
-        )
+    return IndexResponse(
+        repo_id=str(repo_id),
+        status="indexing",
+        message=f"Indexing started for {repo_path.name}. Poll GET /repos/{repo_id} for status.",
+    )
 
 
 # ── List repositories ───────────────────────────────────────────────
@@ -113,13 +95,9 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
 
 @router.get("/repos", response_model=List[RepoResponse])
 async def list_repos():
-    """List all indexed repositories (Supabase only)."""
-    if STORAGE_BACKEND != "supabase":
-        raise HTTPException(
-            status_code=501,
-            detail="Repository listing is only available with STORAGE_BACKEND=supabase.",
-        )
+    """List all indexed repositories."""
     from lumen.storage.supabase_store import list_repositories
+
     rows = list_repositories()
     return [RepoResponse(**r) for r in rows]
 
@@ -130,11 +108,6 @@ async def list_repos():
 @router.get("/repos/{repo_id}", response_model=RepoResponse)
 async def get_repo(repo_id: str):
     """Get details for a single repository."""
-    if STORAGE_BACKEND != "supabase":
-        raise HTTPException(
-            status_code=501,
-            detail="Repository details are only available with STORAGE_BACKEND=supabase.",
-        )
     from lumen.storage.supabase_store import get_repository
 
     try:
@@ -162,11 +135,6 @@ async def list_chunks(
 
     This is the endpoint the Friction Scoring Engine calls.
     """
-    if STORAGE_BACKEND != "supabase":
-        raise HTTPException(
-            status_code=501,
-            detail="Chunk listing is only available with STORAGE_BACKEND=supabase.",
-        )
     from lumen.storage.supabase_store import get_chunks_for_repo, get_repository
 
     try:
@@ -200,14 +168,7 @@ async def query_code(req: QueryRequest):
     """
     from lumen.query.engine import query_index
 
-    # Determine which index to load
-    persist_dir = None
-    if STORAGE_BACKEND != "supabase" and req.repo_path:
-        from pathlib import Path
-        from lumen.config import CHROMA_PERSIST_DIR
-        persist_dir = str(Path(req.repo_path).resolve() / CHROMA_PERSIST_DIR)
-
-    index = get_query_index(persist_dir=persist_dir)
+    index = get_query_index()
     if index is None:
         raise HTTPException(
             status_code=503,
@@ -240,15 +201,14 @@ async def query_code(req: QueryRequest):
 
 
 def _run_indexing_pipeline(
-    repo_id: uuid.UUID | None,
+    repo_id: uuid.UUID,
     repo_path: Path,
     language: str,
 ) -> None:
     """
     Execute the full Lumen indexing pipeline in a background thread.
 
-    This reuses the same functions from ``lumen.indexer`` but wires
-    results to the Supabase tables when a ``repo_id`` is provided.
+    Wires results to the Supabase tables via ``repo_id``.
     """
     import traceback
 
@@ -262,10 +222,7 @@ def _run_indexing_pipeline(
         run_scip_indexer,
     )
     from lumen.config import (
-        CHROMA_COLLECTION,
-        CHROMA_PERSIST_DIR,
         SCIP_INDEX_FILENAME,
-        STORAGE_BACKEND,
         resolve_language,
     )
 
@@ -284,15 +241,13 @@ def _run_indexing_pipeline(
         lang_names = [p.name for p in profiles]
 
         # Update languages on the repo record
-        if repo_id and STORAGE_BACKEND == "supabase":
-            from lumen.storage.supabase_store import update_repository_status
-            from lumen.db.session import get_session
-            from lumen.db.models import Repository
+        from lumen.db.session import get_session
+        from lumen.db.models import Repository
 
-            with get_session() as session:
-                repo = session.get(Repository, repo_id)
-                if repo:
-                    repo.languages = lang_names
+        with get_session() as session:
+            repo = session.get(Repository, repo_id)
+            if repo:
+                repo.languages = lang_names
 
         # ── Proto compilation ────────────────────────────────────
         _ensure_proto_compiled()
@@ -319,29 +274,23 @@ def _run_indexing_pipeline(
         nodes, chunks = ingest(repo_path, parsed_index, all_extensions)
         logger.info("Ingested %d chunks for %s", len(chunks), repo_path.name)
 
-        # ── Persist structured data (Supabase only) ──────────────
-        if repo_id and STORAGE_BACKEND == "supabase":
-            from lumen.storage.supabase_store import persist_chunks
-            persist_chunks(repo_id, chunks)
+        # ── Persist structured data ──────────────────────────────
+        from lumen.storage.supabase_store import persist_chunks
+        persist_chunks(repo_id, chunks)
 
         # ── Embed + persist vectors ──────────────────────────────
-        if STORAGE_BACKEND == "supabase":
-            from lumen.storage.supabase_store import build_index as sb_build
-            sb_build(nodes, repo_id=repo_id)
-        else:
-            chroma_dir = str(repo_path / CHROMA_PERSIST_DIR)
-            embed_and_persist(nodes, chroma_dir, CHROMA_COLLECTION)
+        from lumen.storage.supabase_store import build_index as sb_build
+        sb_build(nodes, repo_id=repo_id)
 
         # ── Update status → ready ────────────────────────────────
         total_symbols = sum(c.symbol_count for c in chunks)
-        if repo_id and STORAGE_BACKEND == "supabase":
-            from lumen.storage.supabase_store import update_repository_status
-            update_repository_status(
-                repo_id,
-                "ready",
-                chunk_count=len(chunks),
-                symbol_count=total_symbols,
-            )
+        from lumen.storage.supabase_store import update_repository_status
+        update_repository_status(
+            repo_id,
+            "ready",
+            chunk_count=len(chunks),
+            symbol_count=total_symbols,
+        )
 
         # Invalidate query cache so next query picks up new data
         invalidate_index_cache()
@@ -355,11 +304,10 @@ def _run_indexing_pipeline(
 
     except Exception as exc:
         logger.error("Background indexing failed: %s\n%s", exc, traceback.format_exc())
-        if repo_id and STORAGE_BACKEND == "supabase":
-            try:
-                from lumen.storage.supabase_store import update_repository_status
-                update_repository_status(
-                    repo_id, "failed", error_message=str(exc)
-                )
-            except Exception:
-                logger.error("Could not update repo status to 'failed'.")
+        try:
+            from lumen.storage.supabase_store import update_repository_status
+            update_repository_status(
+                repo_id, "failed", error_message=str(exc)
+            )
+        except Exception:
+            logger.error("Could not update repo status to 'failed'.")

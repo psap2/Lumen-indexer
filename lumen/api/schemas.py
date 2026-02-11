@@ -33,11 +33,7 @@ class QueryRequest(BaseModel):
 
     repo_id: Optional[str] = Field(
         None,
-        description="UUID of the repository to query (Supabase mode).",
-    )
-    repo_path: Optional[str] = Field(
-        None,
-        description="Path to the indexed repository (ChromaDB mode — used to locate the index).",
+        description="UUID of the repository to query (optional filter).",
     )
     question: str = Field(
         ..., description="Natural-language question about the codebase."

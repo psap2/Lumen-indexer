@@ -1,7 +1,7 @@
 """
 Supabase Postgres + pgvector storage backend for Lumen.
 
-Drop-in replacement for ``vector_store.py`` when ``STORAGE_BACKEND=supabase``.
+Supabase Postgres + pgvector storage backend for Lumen.
 
 Responsibilities:
     1. Write structured data (repos, chunks, symbols) to relational tables.
@@ -32,7 +32,7 @@ from lumen.db.session import get_session
 logger = logging.getLogger(__name__)
 
 
-# ── Embedding singleton (shared with vector_store.py) ────────────────
+# ── Embedding singleton ───────────────────────────────────────────────
 
 _embedding_initialised = False
 
@@ -51,12 +51,7 @@ def _ensure_embedding_model() -> None:
 
 
 def _get_pg_vector_store():
-    """
-    Lazy-import and instantiate the PGVectorStore.
-
-    We import here to avoid a hard dependency on
-    ``llama-index-vector-stores-postgres`` when using the chroma backend.
-    """
+    """Lazy-import and instantiate the PGVectorStore."""
     from llama_index.vector_stores.postgres import PGVectorStore
 
     return PGVectorStore.from_params(
@@ -70,7 +65,7 @@ def _get_pg_vector_store():
     )
 
 
-# ── Public API (mirrors vector_store.py interface) ───────────────────
+# ── Public API ────────────────────────────────────────────────────────
 
 
 def build_index(
