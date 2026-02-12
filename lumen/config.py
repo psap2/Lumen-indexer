@@ -177,6 +177,12 @@ DATABASE_URL: str = os.environ.get("DATABASE_URL", "")
 #: The Postgres table LlamaIndex will use for pgvector embeddings.
 PG_EMBED_TABLE: str = "code_embeddings"
 
+# ── Git clone ────────────────────────────────────────────────────────
+
+#: Base directory for temporary clones of remote repositories.
+#: Defaults to the system temp directory when empty.
+CLONE_DIR: str = os.environ.get("LUMEN_CLONE_DIR", "")
+
 
 # ── Standardised output schema for the Friction Scoring Engine ───────
 

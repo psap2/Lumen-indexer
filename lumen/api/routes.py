@@ -56,7 +56,11 @@ async def health_check():
 @router.post("/repos/index", response_model=IndexResponse)
 async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
     """
-    Kick off background indexing of a local repository.
+    Kick off background indexing of a repository.
+
+    Accepts either a local ``repo_path`` or a remote ``git_url``.
+    When a ``git_url`` is provided the repo is shallow-cloned to a temp
+    directory, indexed, and then cleaned up automatically.
 
     Returns immediately with a ``repo_id`` and ``status: indexing``.
     The caller can poll ``GET /repos/{repo_id}`` to check progress.
@@ -65,21 +69,41 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
     index for this repo path and only re-processes changed files.
     Falls back to a full index if no previous index exists.
     """
-    repo_path = Path(req.repo_path).resolve()
-    if not repo_path.is_dir():
-        raise HTTPException(status_code=400, detail=f"Path does not exist: {repo_path}")
-
-    language = req.language or "auto"
-
     from lumen.storage.supabase_store import (
         create_repository,
         find_repository_by_path,
         update_repository_status,
     )
 
-    # ── Incremental path ──────────────────────────────────────────
-    if req.incremental:
-        existing = find_repository_by_path(str(repo_path))
+    # ── Resolve source: local path or Git URL ────────────────────
+    clone_path = None  # set when we clone a remote repo
+
+    if req.git_url:
+        from lumen.git_clone import clone_repo, repo_name_from_url
+
+        try:
+            clone_path = clone_repo(req.git_url, branch=req.branch)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        repo_path = clone_path
+        repo_display_name = repo_name_from_url(req.git_url)
+        path_or_url = req.git_url
+    else:
+        repo_path = Path(req.repo_path).resolve()
+        if not repo_path.is_dir():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Path does not exist: {repo_path}",
+            )
+        repo_display_name = repo_path.name
+        path_or_url = str(repo_path)
+
+    language = req.language or "auto"
+
+    # ── Incremental path (local repos only) ───────────────────────
+    if req.incremental and not clone_path:
+        existing = find_repository_by_path(path_or_url)
         if existing is not None:
             rid = uuid.UUID(existing["id"])
             update_repository_status(rid, "indexing")
@@ -93,7 +117,7 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
                 repo_id=str(rid),
                 status="indexing",
                 message=(
-                    f"Incremental re-index started for {repo_path.name}. "
+                    f"Incremental re-index started for {repo_display_name}. "
                     f"Poll GET /repos/{rid} for status."
                 ),
             )
@@ -102,8 +126,8 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
 
     # ── Full index path ───────────────────────────────────────────
     repo_id = create_repository(
-        name=repo_path.name,
-        path_or_url=str(repo_path),
+        name=repo_display_name,
+        path_or_url=path_or_url,
         languages=[language],
     )
     update_repository_status(repo_id, "indexing")
@@ -113,12 +137,13 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
         repo_id=repo_id,
         repo_path=repo_path,
         language=language,
+        clone_path=clone_path,
     )
 
     return IndexResponse(
         repo_id=str(repo_id),
         status="indexing",
-        message=f"Indexing started for {repo_path.name}. Poll GET /repos/{repo_id} for status.",
+        message=f"Indexing started for {repo_display_name}. Poll GET /repos/{repo_id} for status.",
     )
 
 
@@ -304,11 +329,14 @@ def _run_indexing_pipeline(
     repo_id: uuid.UUID,
     repo_path: Path,
     language: str,
+    clone_path: Path | None = None,
 ) -> None:
     """
     Execute the full Lumen indexing pipeline in a background thread.
 
     Wires results to the Supabase tables via ``repo_id``.
+    When *clone_path* is set, the cloned directory is deleted in the
+    ``finally`` block regardless of success or failure.
     """
     import traceback
 
@@ -393,13 +421,15 @@ def _run_indexing_pipeline(
         )
 
         # Save file states so incremental re-index has a baseline
-        from lumen.incremental import detect_file_changes, save_file_states
+        # (skip for cloned repos — they don't persist on disk)
+        if not clone_path:
+            from lumen.incremental import detect_file_changes, save_file_states
 
-        initial_changes = detect_file_changes(repo_id, repo_path, all_extensions)
-        chunk_counts: dict[str, int] = {}
-        for c in chunks:
-            chunk_counts[c.file_path] = chunk_counts.get(c.file_path, 0) + 1
-        save_file_states(repo_id, initial_changes, chunk_counts)
+            initial_changes = detect_file_changes(repo_id, repo_path, all_extensions)
+            chunk_counts: dict[str, int] = {}
+            for c in chunks:
+                chunk_counts[c.file_path] = chunk_counts.get(c.file_path, 0) + 1
+            save_file_states(repo_id, initial_changes, chunk_counts)
 
         # Invalidate query cache so next query picks up new data
         invalidate_index_cache()
@@ -420,6 +450,12 @@ def _run_indexing_pipeline(
             )
         except Exception:
             logger.error("Could not update repo status to 'failed'.")
+
+    finally:
+        # Always clean up cloned repos
+        if clone_path:
+            from lumen.git_clone import cleanup_clone
+            cleanup_clone(clone_path)
 
 
 def _run_incremental_pipeline(

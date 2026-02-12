@@ -424,9 +424,10 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python -m lumen.indexer ./my-project                        # auto-detect language\n"
+            "  python -m lumen.indexer ./my-project                        # local repo, auto-detect\n"
             "  python -m lumen.indexer ./my-project --language python       # explicit language\n"
-            "  python -m lumen.indexer ./my-project --language typescript,python  # multi-language\n"
+            "  python -m lumen.indexer --git-url https://github.com/org/repo.git  # remote repo\n"
+            "  python -m lumen.indexer --git-url https://github.com/org/repo.git --branch dev\n"
             "  python -m lumen.indexer ./my-project --skip-scip\n"
             "  python -m lumen.indexer ./my-project --query-only\n"
             '  python -m lumen.indexer ./my-project -q "What does parseConfig do?"'
@@ -435,7 +436,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "repo_path",
         type=str,
-        help="Path to the local repository to index.",
+        nargs="?",
+        default=None,
+        help="Path to the local repository to index (or use --git-url).",
+    )
+    p.add_argument(
+        "--git-url",
+        type=str,
+        default=None,
+        help="Git clone URL (HTTPS or SSH).  Clones to a temp dir, indexes, then cleans up.",
+    )
+    p.add_argument(
+        "--branch",
+        type=str,
+        default=None,
+        help="Branch to clone (only used with --git-url).  Defaults to repo default branch.",
     )
     p.add_argument(
         "--language", "-l",
@@ -500,10 +515,39 @@ def main(argv: Optional[list[str]] = None) -> None:
         datefmt="%H:%M:%S",
     )
 
-    repo_root = Path(args.repo_path).resolve()
-    if not repo_root.is_dir():
-        logger.error("Repository path does not exist: %s", repo_root)
+    # ── Resolve source: local path or Git URL ────────────────────
+    clone_path: Optional[Path] = None
+
+    if args.git_url:
+        if args.repo_path:
+            logger.error("Provide either repo_path or --git-url, not both.")
+            sys.exit(1)
+        from lumen.git_clone import clone_repo, repo_name_from_url
+        try:
+            clone_path = clone_repo(args.git_url, branch=args.branch)
+        except RuntimeError as exc:
+            logger.error("Clone failed: %s", exc)
+            sys.exit(1)
+        repo_root = clone_path
+    elif args.repo_path:
+        repo_root = Path(args.repo_path).resolve()
+        if not repo_root.is_dir():
+            logger.error("Repository path does not exist: %s", repo_root)
+            sys.exit(1)
+    else:
+        logger.error("Provide either a repo_path argument or --git-url.")
         sys.exit(1)
+
+    try:
+        _main_inner(args, repo_root, clone_path)
+    finally:
+        if clone_path:
+            from lumen.git_clone import cleanup_clone
+            cleanup_clone(clone_path)
+
+
+def _main_inner(args, repo_root: Path, clone_path: Optional[Path]) -> None:
+    """Inner main logic, separated so clone cleanup runs in finally."""
 
     # ── Query-only mode ──────────────────────────────────────────
     if args.query_only:
@@ -671,36 +715,42 @@ def main(argv: Optional[list[str]] = None) -> None:
         )
 
         # Save file states so incremental re-index has a baseline
-        from lumen.incremental import (
-            detect_file_changes,
-            save_file_states,
-        )
+        # (skip for cloned repos — they don't persist on disk)
+        if not clone_path:
+            from lumen.incremental import (
+                detect_file_changes,
+                save_file_states,
+            )
 
-        initial_changes = detect_file_changes(
-            repo_id, repo_root, all_extensions,
-        )
-        chunk_counts: Dict[str, int] = {}
-        for c in chunks:
-            chunk_counts[c.file_path] = chunk_counts.get(c.file_path, 0) + 1
-        save_file_states(repo_id, initial_changes, chunk_counts)
+            initial_changes = detect_file_changes(
+                repo_id, repo_root, all_extensions,
+            )
+            chunk_counts: Dict[str, int] = {}
+            for c in chunks:
+                chunk_counts[c.file_path] = chunk_counts.get(c.file_path, 0) + 1
+            save_file_states(repo_id, initial_changes, chunk_counts)
 
     except Exception:
         update_repository_status(repo_id, "failed", error_message="Embedding failed")
         raise
 
     # ── Step 5: Query ────────────────────────────────────────────
+    source_label = args.git_url or str(repo_root)
     if args.question:
         run_query(args.question)
     else:
         print(f"\n{'═' * 60}")
         print("  Lumen indexing complete!")
+        print(f"  Source:    {source_label}")
         print(f"  Languages: {', '.join(lang_names)}")
         print(f"  Chunks:    {len(chunks)}")
         print(f"  Repo ID:   {repo_id}")
         print(f"  Storage:   Supabase (pgvector)")
         print(f"{'═' * 60}\n")
 
-        run_repl(repo_id=str(repo_id))
+        # Skip REPL for cloned repos (clone is about to be deleted)
+        if not clone_path:
+            run_repl(repo_id=str(repo_id))
 
 
 if __name__ == "__main__":
