@@ -40,7 +40,18 @@ class QueryRequest(BaseModel):
 
     repo_id: Optional[str] = Field(
         None,
-        description="UUID of the repository to query (optional filter).",
+        description=(
+            "UUID of a single repository to scope the query to. "
+            "Mutually exclusive with repo_ids."
+        ),
+    )
+    repo_ids: Optional[List[str]] = Field(
+        None,
+        description=(
+            "List of repository UUIDs to scope the query to (OR logic). "
+            "Use this when querying across a known set of repos, e.g. "
+            "a frontend + backend pair.  Mutually exclusive with repo_id."
+        ),
     )
     question: str = Field(
         ..., description="Natural-language question about the codebase."

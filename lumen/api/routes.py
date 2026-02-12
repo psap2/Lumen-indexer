@@ -247,9 +247,20 @@ async def query_code(req: QueryRequest):
     """
     Run a semantic search against the indexed codebase.
 
+    When ``repo_id`` or ``repo_ids`` is provided, results are scoped
+    to the specified repository/repositories.  Otherwise, all indexed
+    repos are searched.
+
     Returns ranked code chunks with similarity scores.
     """
     from lumen.query.engine import query_index
+
+    # Validate mutual exclusivity of repo_id / repo_ids
+    if req.repo_id and req.repo_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either repo_id or repo_ids, not both.",
+        )
 
     index = get_query_index()
     if index is None:
@@ -258,7 +269,13 @@ async def query_code(req: QueryRequest):
             detail="No index available. Index a repository first.",
         )
 
-    results = query_index(req.question, index=index, top_k=req.top_k)
+    results = query_index(
+        req.question,
+        index=index,
+        top_k=req.top_k,
+        repo_id=req.repo_id,
+        repo_ids=req.repo_ids,
+    )
 
     items = [
         QueryResultItem(
@@ -354,7 +371,7 @@ def _run_indexing_pipeline(
 
         # ── Ingest ───────────────────────────────────────────────
         all_extensions = frozenset().union(*(p.extensions for p in profiles))
-        nodes, chunks = ingest(repo_path, parsed_index, all_extensions)
+        nodes, chunks = ingest(repo_path, parsed_index, all_extensions, repo_id=str(repo_id))
         logger.info("Ingested %d chunks for %s", len(chunks), repo_path.name)
 
         # ── Persist structured data ──────────────────────────────

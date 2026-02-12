@@ -222,6 +222,7 @@ def ingest(
     parsed_index,
     extensions: frozenset[str],
     file_filter: Optional[set[str]] = None,
+    repo_id: Optional[str] = None,
 ):
     from lumen.ingestion.code_ingestor import ingest_repository
 
@@ -230,6 +231,7 @@ def ingest(
         parsed_index=parsed_index,
         extensions=extensions,
         file_filter=file_filter,
+        repo_id=repo_id,
     )
     return nodes, chunks
 
@@ -273,39 +275,11 @@ def run_query(question: str) -> None:
         print()
 
 
-def run_repl() -> None:
-    """Interactive REPL backed by Supabase."""
-    from lumen.storage.supabase_store import load_index
-    from lumen.query.engine import query_index
+def run_repl(repo_id: Optional[str] = None) -> None:
+    """Interactive REPL backed by Supabase, optionally scoped to a repo."""
+    from lumen.query.engine import interactive_repl
 
-    index = load_index()
-    if index is None:
-        print("ERROR: No index available. Run indexing first.")
-        return
-
-    print("─" * 60)
-    print("Lumen Query REPL  (type 'exit' or Ctrl-C to quit)")
-    print("─" * 60)
-
-    while True:
-        try:
-            question = input("\n❯ ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nBye.")
-            break
-        if not question or question.lower() in {"exit", "quit", "q"}:
-            print("Bye.")
-            break
-        results = query_index(question, index=index, top_k=5)
-        if not results:
-            print("  (no results)")
-            continue
-        for i, r in enumerate(results, 1):
-            print(f"\n  ── Result {i} {r.summary()}")
-            preview = "\n".join(r.text.splitlines()[:20])
-            print(f"{preview}")
-            if len(r.text.splitlines()) > 20:
-                print("    …")
+    interactive_repl(repo_id=repo_id)
 
 
 # ── Incremental indexing ─────────────────────────────────────────────
@@ -405,6 +379,7 @@ def incremental_index(
         nodes, chunks = ingest(
             repo_root, parsed_index, all_extensions,
             file_filter=new_or_modified,
+            repo_id=str(repo_id),
         )
 
         # ── 5. Persist new structured data + embeddings ───────────
@@ -599,7 +574,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                 print(f"  Repo ID:   {repo_id}")
                 print(f"{'═' * 60}\n")
 
-                run_repl()
+                run_repl(repo_id=str(repo_id))
             return
 
     # ── Step 1: SCIP indexer(s) ──────────────────────────────────
@@ -644,6 +619,20 @@ def main(argv: Optional[list[str]] = None) -> None:
     else:
         logger.warning("No SCIP data available — chunks will lack symbol enrichment.")
 
+    # ── Create repository record early so repo_id is available ────
+    from lumen.storage.supabase_store import (
+        create_repository,
+        persist_chunks,
+        update_repository_status,
+    )
+
+    repo_id = create_repository(
+        name=repo_root.name,
+        path_or_url=str(repo_root),
+        languages=lang_names,
+    )
+    update_repository_status(repo_id, "indexing")
+
     # ── Step 3: Ingest ───────────────────────────────────────────
     all_extensions: frozenset[str] = frozenset().union(
         *(p.extensions for p in profiles)
@@ -653,7 +642,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         repo_root,
         ", ".join(sorted(all_extensions)),
     )
-    nodes, chunks = ingest(repo_root, parsed_index, all_extensions)
+    nodes, chunks = ingest(repo_root, parsed_index, all_extensions, repo_id=str(repo_id))
     logger.info("  → %d enriched code chunks", len(chunks))
 
     # ── Step 3b (optional): Export chunks ────────────────────────
@@ -670,19 +659,6 @@ def main(argv: Optional[list[str]] = None) -> None:
         sys.exit(0)
 
     logger.info("Building vector index (%d nodes) …", len(nodes))
-
-    from lumen.storage.supabase_store import (
-        create_repository,
-        persist_chunks,
-        update_repository_status,
-    )
-
-    repo_id = create_repository(
-        name=repo_root.name,
-        path_or_url=str(repo_root),
-        languages=lang_names,
-    )
-    update_repository_status(repo_id, "indexing")
 
     try:
         persist_chunks(repo_id, chunks)
@@ -724,7 +700,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         print(f"  Storage:   Supabase (pgvector)")
         print(f"{'═' * 60}\n")
 
-        run_repl()
+        run_repl(repo_id=str(repo_id))
 
 
 if __name__ == "__main__":

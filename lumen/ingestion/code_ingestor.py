@@ -206,6 +206,7 @@ def ingest_repository(
     extensions: Optional[frozenset[str]] = None,
     ignore_patterns: Optional[List[str]] = None,
     file_filter: Optional[Set[str]] = None,
+    repo_id: Optional[str] = None,
 ) -> tuple[List[TextNode], List[IndexedChunk]]:
     """
     Walk a repository, split source files, and produce LlamaIndex
@@ -225,6 +226,9 @@ def ingest_repository(
         When provided, only files whose *relative path* is in this set
         will be ingested.  Used by the incremental indexing pipeline to
         restrict processing to new and modified files.
+    repo_id:
+        String UUID of the repository.  Stored in each ``TextNode``'s
+        metadata so downstream queries can filter by repository.
 
     Returns
     -------
@@ -313,6 +317,7 @@ def ingest_repository(
                 text=enriched_text,
                 id_=cid,
                 metadata={
+                    "repo_id": repo_id or "",
                     "file_path": rel_path,
                     "language": lang,
                     "line_start": start_line,
@@ -334,8 +339,8 @@ def ingest_repository(
                     ),
                     "chunk_id": cid,
                 },
-                excluded_embed_metadata_keys=["chunk_id"],
-                excluded_llm_metadata_keys=["chunk_id"],
+                excluded_embed_metadata_keys=["chunk_id", "repo_id"],
+                excluded_llm_metadata_keys=["chunk_id", "repo_id"],
             )
             nodes.append(node)
 

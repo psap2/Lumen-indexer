@@ -2,7 +2,8 @@
 Query engine — semantic search over the SCIP-enriched code index.
 
 Provides both a programmatic API and a simple REPL for interactive
-exploration.
+exploration.  Supports optional metadata filtering so callers can
+scope queries to specific repositories.
 """
 
 from __future__ import annotations
@@ -12,6 +13,12 @@ from typing import List, Optional
 
 from llama_index.core import VectorStoreIndex
 from llama_index.core.schema import NodeWithScore
+from llama_index.core.vector_stores import (
+    FilterCondition,
+    FilterOperator,
+    MetadataFilter,
+    MetadataFilters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +77,50 @@ class QueryResult:
 # ── Query helpers ────────────────────────────────────────────────────
 
 
+def _build_repo_filters(
+    repo_id: Optional[str] = None,
+    repo_ids: Optional[List[str]] = None,
+) -> Optional[MetadataFilters]:
+    """
+    Build a ``MetadataFilters`` object for repository-scoped queries.
+
+    * ``repo_id``  — filter to a single repository (EQ).
+    * ``repo_ids`` — filter to one of several repositories (OR of EQs).
+    * Both ``None`` — no filter (search across all repos).
+    """
+    if repo_id:
+        return MetadataFilters(
+            filters=[
+                MetadataFilter(
+                    key="repo_id",
+                    value=repo_id,
+                    operator=FilterOperator.EQ,
+                ),
+            ],
+        )
+
+    if repo_ids:
+        return MetadataFilters(
+            filters=[
+                MetadataFilter(
+                    key="repo_id",
+                    value=rid,
+                    operator=FilterOperator.EQ,
+                )
+                for rid in repo_ids
+            ],
+            condition=FilterCondition.OR,
+        )
+
+    return None
+
+
 def query_index(
     question: str,
     index: Optional[VectorStoreIndex] = None,
     top_k: int = 5,
+    repo_id: Optional[str] = None,
+    repo_ids: Optional[List[str]] = None,
 ) -> List[QueryResult]:
     """
     Run a semantic search against the Lumen code index.
@@ -88,6 +135,12 @@ def query_index(
         is loaded from Supabase.
     top_k:
         Number of results to return.
+    repo_id:
+        When provided, restrict results to chunks from this single
+        repository (UUID string).
+    repo_ids:
+        When provided, restrict results to chunks from any of these
+        repositories (list of UUID strings, OR logic).
 
     Returns
     -------
@@ -102,7 +155,12 @@ def query_index(
             logger.error("No index available. Run the indexer first.")
             return []
 
-    retriever = index.as_retriever(similarity_top_k=top_k)
+    filters = _build_repo_filters(repo_id=repo_id, repo_ids=repo_ids)
+
+    retriever = index.as_retriever(
+        similarity_top_k=top_k,
+        filters=filters,
+    )
     raw_results: List[NodeWithScore] = retriever.retrieve(question)
     return [QueryResult(r) for r in raw_results]
 
@@ -111,6 +169,8 @@ def query_function(
     function_name: str,
     index: Optional[VectorStoreIndex] = None,
     top_k: int = 3,
+    repo_id: Optional[str] = None,
+    repo_ids: Optional[List[str]] = None,
 ) -> List[QueryResult]:
     """
     Convenience wrapper: ask the index about a specific function.
@@ -126,14 +186,28 @@ def query_function(
         question,
         index=index,
         top_k=top_k,
+        repo_id=repo_id,
+        repo_ids=repo_ids,
     )
 
 
 # ── Interactive REPL ─────────────────────────────────────────────────
 
 
-def interactive_repl() -> None:
-    """Launch a minimal interactive query loop."""
+def interactive_repl(
+    repo_id: Optional[str] = None,
+    repo_ids: Optional[List[str]] = None,
+) -> None:
+    """
+    Launch a minimal interactive query loop.
+
+    Parameters
+    ----------
+    repo_id:
+        When provided, every query is scoped to this single repo.
+    repo_ids:
+        When provided, every query is scoped to these repos (OR).
+    """
     from lumen.storage.supabase_store import load_index
 
     index = load_index()
@@ -143,6 +217,10 @@ def interactive_repl() -> None:
 
     print("─" * 60)
     print("Lumen Query REPL  (type 'exit' or Ctrl-C to quit)")
+    if repo_id:
+        print(f"  Scoped to repo: {repo_id}")
+    elif repo_ids:
+        print(f"  Scoped to repos: {', '.join(repo_ids)}")
     print("─" * 60)
 
     while True:
@@ -156,7 +234,13 @@ def interactive_repl() -> None:
             print("Bye.")
             break
 
-        results = query_index(question, index=index, top_k=5)
+        results = query_index(
+            question,
+            index=index,
+            top_k=5,
+            repo_id=repo_id,
+            repo_ids=repo_ids,
+        )
         if not results:
             print("  (no results)")
             continue
