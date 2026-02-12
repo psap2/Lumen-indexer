@@ -17,7 +17,12 @@ class IndexRequest(BaseModel):
     """POST /api/v1/repos/index"""
 
     repo_path: str = Field(
-        ..., description="Absolute path to the local repository to index."
+        ..., 
+        description=(
+            "Absolute path to a local repository, or a git clone URL "
+            "(e.g., https://github.com/user/repo.git or "
+            "https://token@github.com/user/repo.git)."
+        )
     )
     language: Optional[str] = Field(
         None,

@@ -87,6 +87,7 @@ python -m lumen.indexer /path/to/your-project --query-only
 
 ```bash
 python -m lumen.api.main
+API_PORT=8001 python -m lumen.api.main
 ```
 
 The API starts at `http://localhost:8000`. Check `http://localhost:8000/docs`
