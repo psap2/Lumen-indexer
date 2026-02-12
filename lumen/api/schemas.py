@@ -7,17 +7,35 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── Requests ─────────────────────────────────────────────────────────
 
 
 class IndexRequest(BaseModel):
-    """POST /api/v1/repos/index"""
+    """POST /api/v1/repos/index
 
-    repo_path: str = Field(
-        ..., description="Absolute path to the local repository to index."
+    Provide **either** ``repo_path`` (local directory) **or**
+    ``git_url`` (remote clone URL), not both.
+    """
+
+    repo_path: Optional[str] = Field(
+        None, description="Absolute path to a local repository to index."
+    )
+    git_url: Optional[str] = Field(
+        None,
+        description=(
+            "Git clone URL (HTTPS or SSH).  The repo will be shallow-cloned "
+            "to a temp directory, indexed, then cleaned up."
+        ),
+    )
+    branch: Optional[str] = Field(
+        None,
+        description=(
+            "Branch to clone when using git_url.  "
+            "Defaults to the repository's default branch."
+        ),
     )
     language: Optional[str] = Field(
         None,
@@ -33,6 +51,16 @@ class IndexRequest(BaseModel):
             "run.  Falls back to a full index if no previous index exists."
         ),
     )
+
+    @model_validator(mode="after")
+    def _check_source(self) -> "IndexRequest":
+        if not self.repo_path and not self.git_url:
+            raise ValueError("Provide either repo_path or git_url.")
+        if self.repo_path and self.git_url:
+            raise ValueError("Provide either repo_path or git_url, not both.")
+        if self.branch and not self.git_url:
+            raise ValueError("branch is only valid when using git_url.")
+        return self
 
 
 class QueryRequest(BaseModel):
