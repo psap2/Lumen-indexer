@@ -155,6 +155,7 @@ def run_scip_indexer(
             capture_output=True,
             text=True,
             timeout=300,
+            shell=True,  # Required on Windows to find .cmd/.bat files like npx
         )
     except FileNotFoundError:
         tool = cmd[0]

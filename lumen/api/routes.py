@@ -69,6 +69,8 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
     index for this repo path and only re-processes changed files.
     Falls back to a full index if no previous index exists.
     """
+    print("POST /repos/index — request body: %s", req.model_dump_json())
+
     from lumen.storage.supabase_store import (
         create_repository,
         find_repository_by_path,
@@ -125,11 +127,16 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
         logger.info("No prior index for %s — performing full index.", repo_path)
 
     # ── Full index path ───────────────────────────────────────────
-    repo_id = create_repository(
-        name=repo_display_name,
-        path_or_url=path_or_url,
-        languages=[language],
-    )
+    existing = find_repository_by_path(path_or_url)
+    if existing is not None:
+        repo_id = uuid.UUID(existing["id"])
+        logger.info("Found existing repository %s for %s — re-indexing.", repo_id, path_or_url)
+    else:
+        repo_id = create_repository(
+            name=repo_display_name,
+            path_or_url=path_or_url,
+            languages=[language],
+        )
     update_repository_status(repo_id, "indexing")
 
     background_tasks.add_task(
