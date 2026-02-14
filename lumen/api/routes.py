@@ -81,7 +81,7 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
     clone_path = None  # set when we clone a remote repo
 
     if req.git_url:
-        from lumen.git_clone import clone_repo, repo_name_from_url
+        from lumen.git_clone import clone_repo, normalize_git_url, repo_name_from_url
 
         try:
             clone_path = clone_repo(req.git_url, branch=req.branch)
@@ -90,7 +90,10 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
 
         repo_path = clone_path
         repo_display_name = repo_name_from_url(req.git_url)
-        path_or_url = req.git_url
+        # Keep original URL for lookup, normalize for storage
+        original_url = req.git_url
+        normalized_url = normalize_git_url(req.git_url)
+        path_or_url = original_url  # Use original for initial lookup
     else:
         repo_path = Path(req.repo_path).resolve()
         if not repo_path.is_dir():
@@ -108,6 +111,9 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
         existing = find_repository_by_path(path_or_url)
         if existing is not None:
             rid = uuid.UUID(existing["id"])
+            # Normalize the stored URL if it's a git URL
+            if clone_path:
+                _normalize_stored_url(rid, normalized_url)
             update_repository_status(rid, "indexing")
             background_tasks.add_task(
                 _run_incremental_pipeline,
@@ -127,14 +133,25 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
         logger.info("No prior index for %s — performing full index.", repo_path)
 
     # ── Full index path ───────────────────────────────────────────
+    # Try to find existing repo by original URL first (for backward compatibility)
     existing = find_repository_by_path(path_or_url)
+
+    # If not found and this is a git URL, try normalized URL
+    if not existing and clone_path:
+        existing = find_repository_by_path(normalized_url)
+
     if existing is not None:
         repo_id = uuid.UUID(existing["id"])
         logger.info("Found existing repository %s for %s — re-indexing.", repo_id, path_or_url)
+        # Normalize the stored URL if it's a git URL with credentials
+        if clone_path and existing.get("path_or_url") != normalized_url:
+            _normalize_stored_url(repo_id, normalized_url)
+            logger.info("Normalized stored URL for repo %s", repo_id)
     else:
+        # Create new repo with normalized URL for git URLs
         repo_id = create_repository(
             name=repo_display_name,
-            path_or_url=path_or_url,
+            path_or_url=normalized_url if clone_path else path_or_url,
             languages=[language],
         )
     update_repository_status(repo_id, "indexing")
@@ -330,6 +347,17 @@ async def query_code(req: QueryRequest):
 
 
 # ── Background indexing pipeline ─────────────────────────────────────
+
+
+def _normalize_stored_url(repo_id: uuid.UUID, normalized_url: str) -> None:
+    """Update a repository's path_or_url to the normalized version."""
+    from lumen.db.session import get_session
+    from lumen.db.models import Repository
+
+    with get_session() as session:
+        repo = session.get(Repository, repo_id)
+        if repo:
+            repo.path_or_url = normalized_url
 
 
 def _run_indexing_pipeline(

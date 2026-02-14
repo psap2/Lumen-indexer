@@ -137,6 +137,35 @@ def run_scip_indexer(
 
     output_path = repo_root / SCIP_INDEX_FILENAME
 
+    # ── Install dependencies for TypeScript/JavaScript projects ───
+    if profile.name == "typescript":
+        package_json = repo_root / "package.json"
+        if package_json.exists():
+            logger.info("Detected package.json — installing dependencies …")
+            try:
+                # Try npm install (faster with --production and --legacy-peer-deps for compatibility)
+                install_result = subprocess.run(
+                    ["npm", "install", "--production", "--legacy-peer-deps"],
+                    cwd=str(repo_root),
+                    capture_output=True,
+                    text=True,
+                    timeout=180,  # 3 minute timeout
+                )
+                if install_result.returncode != 0:
+                    logger.warning(
+                        "npm install failed (exit %d), SCIP indexing may be incomplete",
+                        install_result.returncode,
+                    )
+                    if install_result.stderr:
+                        logger.debug("npm stderr: %s", install_result.stderr[:500])
+                else:
+                    logger.info("Dependencies installed successfully")
+            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                logger.warning(
+                    "Could not install dependencies (%s), SCIP indexing may be incomplete",
+                    exc,
+                )
+
     # Build the command — some indexers need extra flags.
     cmd = list(profile.scip_command)
 
@@ -155,7 +184,7 @@ def run_scip_indexer(
             capture_output=True,
             text=True,
             timeout=300,
-            shell=True,  # Required on Windows to find .cmd/.bat files like npx
+            #shell=True,  # Required on Windows to find .cmd/.bat files like npx
         )
     except FileNotFoundError:
         tool = cmd[0]
@@ -166,10 +195,15 @@ def run_scip_indexer(
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
-        raise RuntimeError(
-            f"SCIP indexer ({profile.name}) exited with code {result.returncode}.\n"
-            f"stderr:\n{stderr}"
-        )
+        stdout = result.stdout.strip()
+        error_msg = f"SCIP indexer ({profile.name}) exited with code {result.returncode}."
+        if stderr:
+            error_msg += f"\nstderr:\n{stderr}"
+        if stdout:
+            error_msg += f"\nstdout:\n{stdout}"
+        if not stderr and not stdout:
+            error_msg += "\n(No error output captured)"
+        raise RuntimeError(error_msg)
 
     if result.stdout.strip():
         logger.debug("SCIP stdout:\n%s", result.stdout.strip())
@@ -518,18 +552,21 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # ── Resolve source: local path or Git URL ────────────────────
     clone_path: Optional[Path] = None
+    normalized_git_url: Optional[str] = None
 
     if args.git_url:
         if args.repo_path:
             logger.error("Provide either repo_path or --git-url, not both.")
             sys.exit(1)
-        from lumen.git_clone import clone_repo, repo_name_from_url
+        from lumen.git_clone import clone_repo, normalize_git_url, repo_name_from_url
         try:
             clone_path = clone_repo(args.git_url, branch=args.branch)
         except RuntimeError as exc:
             logger.error("Clone failed: %s", exc)
             sys.exit(1)
         repo_root = clone_path
+        # Normalize the git URL for database storage (removes embedded credentials)
+        normalized_git_url = normalize_git_url(args.git_url)
     elif args.repo_path:
         repo_root = Path(args.repo_path).resolve()
         if not repo_root.is_dir():
@@ -671,9 +708,12 @@ def _main_inner(args, repo_root: Path, clone_path: Optional[Path]) -> None:
         update_repository_status,
     )
 
+    # Use normalized git URL if available, otherwise local path
+    path_or_url = normalized_git_url if clone_path else str(repo_root)
+
     repo_id = create_repository(
         name=repo_root.name,
-        path_or_url=str(repo_root),
+        path_or_url=path_or_url,
         languages=lang_names,
     )
     update_repository_status(repo_id, "indexing")

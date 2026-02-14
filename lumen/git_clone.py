@@ -32,6 +32,41 @@ def is_git_url(value: str) -> bool:
     return bool(_GIT_URL_PATTERN.match(value.strip()))
 
 
+def normalize_git_url(url: str) -> str:
+    """
+    Normalize a Git URL by removing embedded credentials (tokens, passwords).
+
+    This ensures that URLs with different credentials are treated as the same
+    repository, preventing duplicate entries and lookup issues.
+
+    Examples::
+
+        https://x-access-token:ghp_xxx@github.com/org/repo.git  →  https://github.com/org/repo.git
+        https://user:pass@github.com/org/repo.git               →  https://github.com/org/repo.git
+        https://github.com/org/repo.git                         →  https://github.com/org/repo.git
+        git@github.com:org/repo.git                             →  git@github.com:org/repo.git
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    # Only normalize HTTP(S) URLs; SSH URLs (git@...) don't have embedded creds
+    if not url.startswith(("http://", "https://")):
+        return url.strip()
+
+    parsed = urlparse(url.strip())
+
+    # Reconstruct URL without username/password
+    normalized = urlunparse((
+        parsed.scheme,
+        parsed.hostname + (f":{parsed.port}" if parsed.port else ""),
+        parsed.path,
+        parsed.params,
+        parsed.query,
+        parsed.fragment,
+    ))
+
+    return normalized
+
+
 def repo_name_from_url(url: str) -> str:
     """
     Extract a human-readable repo name from a Git URL.
