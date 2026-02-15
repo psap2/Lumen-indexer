@@ -52,16 +52,19 @@ def polyglot_repo(tmp_path: Path) -> Path:
     A realistic multi-language repo with enough code to produce
     multiple chunks per file (exercises the splitter).
     """
-    # Python — long enough to split into 2+ chunks at 60-line default
+    # Python — long enough to split into 2+ chunks even with tree-sitter
+    # aware splitting (must exceed CHUNK_MAX_CHARS=3000 AND CHUNK_LINES=60).
     py_lines = []
     py_lines.append("import os\nimport sys\nfrom pathlib import Path\n\n")
-    for i in range(8):
+    for i in range(20):
         py_lines.append(
             f"def function_{i}(x: int, y: int) -> int:\n"
             f'    """Compute something for case {i}."""\n'
             f"    result = x + y + {i}\n"
             f"    if result > 100:\n"
             f"        return result - {i}\n"
+            f"    for j in range({i}):\n"
+            f"        result += j\n"
             f"    return result * 2\n\n\n"
         )
     py_lines.append(
@@ -145,11 +148,12 @@ def rich_parsed_index(polyglot_repo: Path) -> ParsedIndex:
     A ParsedIndex with symbols that map to the polyglot_repo files,
     simulating what SCIP would produce.
     """
-    # Python symbols
+    # Python symbols — 20 functions + 1 class matching the polyglot_repo fixture.
+    # Each function is 10 lines (8 code + 2 blank), starting after 4 lines of imports.
     py_symbols = []
     py_occurrences = []
-    for i in range(8):
-        line = 4 + i * 8  # approximate line for each function
+    for i in range(20):
+        line = 4 + i * 10  # approximate line for each function
         sym = ParsedSymbol(
             symbol_id=f"pkg/processor.py/function_{i}().",
             kind="Function",
@@ -166,6 +170,7 @@ def rich_parsed_index(polyglot_repo: Path) -> ParsedIndex:
             is_definition=True,
         ))
 
+    class_line = 4 + 20 * 10  # after all 20 functions
     class_sym = ParsedSymbol(
         symbol_id="pkg/processor.py/DataProcessor#",
         kind="Class",
@@ -181,9 +186,9 @@ def rich_parsed_index(polyglot_repo: Path) -> ParsedIndex:
     py_symbols.append(class_sym)
     py_occurrences.append(SymbolOccurrence(
         symbol=class_sym.symbol_id,
-        start_line=68,
+        start_line=class_line,
         start_char=6,
-        end_line=68,
+        end_line=class_line,
         end_char=19,
         is_definition=True,
     ))
@@ -656,7 +661,7 @@ class TestChunkSplitting:
     """
 
     def test_long_file_produces_multiple_chunks(self, polyglot_repo: Path):
-        """processor.py (80+ lines) should produce more than one chunk."""
+        """processor.py (200+ lines) should produce more than one chunk."""
         _, chunks = ingest_repository(
             polyglot_repo,
             parsed_index=None,

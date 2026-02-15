@@ -1,31 +1,33 @@
 # Lumen — Repository Indexing Service
 # ────────────────────────────────────
+# Pinned to minimum versions that are tested and known to work together.
+# Run: pip install -r requirements.txt
 
-# Core framework
-llama-index-core>=0.11.0
-llama-index-embeddings-huggingface>=0.3.0
-llama-index-readers-file>=0.2.0
+# Core framework — llama-index v0.14+ (the 0.11 API is incompatible)
+llama-index-core>=0.14.0,<0.15
+llama-index-embeddings-huggingface>=0.6.0,<1.0
+llama-index-readers-file>=0.5.0,<1.0
 
 # Vector store — Supabase pgvector
-llama-index-vector-stores-postgres>=0.3.0
+llama-index-vector-stores-postgres>=0.7.0,<1.0
 psycopg2-binary>=2.9.9
 
 # ORM + database
-sqlalchemy>=2.0.0
+sqlalchemy>=2.0.0,<3.0
 
 # Embeddings (pulled transitively, pinned for reproducibility)
-sentence-transformers>=3.0.0
+sentence-transformers>=5.0.0,<6.0
 
 # SCIP protobuf parsing
-protobuf>=5.27.0
+protobuf>=5.27.0,<7.0
 grpcio-tools>=1.60.0
 
-# Code splitting (tree-sitter, optional but recommended)
-tree-sitter>=0.21.0
-tree-sitter-languages>=1.10.0
+# Code splitting (tree-sitter AST-aware chunking)
+tree-sitter>=0.24.0
+tree-sitter-language-pack>=0.13.0
 
 # API server
-fastapi>=0.115.0
+fastapi>=0.115.0,<1.0
 uvicorn[standard]>=0.32.0
 
 # Environment
