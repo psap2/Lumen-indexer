@@ -52,7 +52,7 @@ _EXT_TO_LANGUAGE.update({
     ".c": "c",
     ".h": "c",
     ".pyi": "python",
-    ".cs": "c_sharp",
+    ".cs": "csharp",
 })
 
 
@@ -106,7 +106,7 @@ def _try_code_splitter(language: str):
         )
         return splitter
     except Exception as exc:  # noqa: BLE001
-        logger.debug("CodeSplitter unavailable for %s: %s", language, exc)
+        logger.warning("CodeSplitter unavailable for %s — falling back to line-based split: %s", language, exc)
         return None
 
 
