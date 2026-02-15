@@ -1,0 +1,7 @@
+# Lumen — Development & Testing Dependencies
+# ────────────────────────────────────────────
+# Install alongside the main requirements:
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+# Testing
+pytest>=7.4.0

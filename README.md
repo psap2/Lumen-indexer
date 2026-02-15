@@ -564,6 +564,11 @@ extensions and picks the language(s) with the most files. For a repo with both
 
 ---
 
+##testing run all tests
+`python -m pytest tests/ -v ` 
+
+#make sure for tests 
+`pip install -r requirements.txt -r requirements-dev.txt` 
 ## Current limitations
 
 - **No incremental indexing** — every run rebuilds the full index. For large repos, this can be slow.
