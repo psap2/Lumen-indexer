@@ -126,6 +126,9 @@ class CodeChunk(Base):
     definition_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     relationship_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     complexity_hint: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    ast_metadata: Mapped[Any] = mapped_column(
+        JSONB, nullable=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

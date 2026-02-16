@@ -203,6 +203,7 @@ def persist_chunks(
                     definition_count=chunk.definition_count,
                     relationship_count=chunk.relationship_count,
                     complexity_hint=chunk.complexity_hint,
+                    ast_metadata=chunk.ast_metadata.to_dict() if chunk.ast_metadata else None,
                 )
             )
             for sym in chunk.symbols:
@@ -261,6 +262,7 @@ def get_chunks_for_repo(
                 "definition_count": r.definition_count,
                 "relationship_count": r.relationship_count,
                 "complexity_hint": r.complexity_hint,
+                "ast_metadata": r.ast_metadata,
                 "code": r.code,
             }
             for r in rows
@@ -393,6 +395,7 @@ def persist_chunks_incremental(
                     definition_count=chunk.definition_count,
                     relationship_count=chunk.relationship_count,
                     complexity_hint=chunk.complexity_hint,
+                    ast_metadata=chunk.ast_metadata.to_dict() if chunk.ast_metadata else None,
                 )
             )
             for sym in chunk.symbols:
