@@ -186,6 +186,45 @@ CLONE_DIR: str = os.environ.get("LUMEN_CLONE_DIR", "")
 
 # ── Standardised output schema for the Friction Scoring Engine ───────
 
+
+@dataclass
+class ASTMetadata:
+    """
+    Structural metadata extracted from the tree-sitter AST.
+
+    This is always available (tree-sitter never fails) and provides a
+    reliable baseline of code understanding even when SCIP is absent.
+    """
+
+    #: Top-level AST node types in this chunk (e.g. "function_definition",
+    #: "class_definition", "import_from_statement").
+    node_types: list[str] = field(default_factory=list)
+
+    #: Function / method / class signatures extracted from the AST.
+    #: e.g. ["def get_user(user_id: int) -> User", "class UserController"]
+    signatures: list[str] = field(default_factory=list)
+
+    #: Import statements found in this chunk.
+    #: e.g. ["from services.user import UserService", "import os"]
+    imports: list[str] = field(default_factory=list)
+
+    #: Count of branching constructs (if, for, while, try, switch/match).
+    #: A simple but reliable proxy for cyclomatic complexity.
+    complexity: int = 0
+
+    #: Maximum nesting depth of scopes in this chunk.
+    nesting_depth: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "node_types": self.node_types,
+            "signatures": self.signatures,
+            "imports": self.imports,
+            "complexity": self.complexity,
+            "nesting_depth": self.nesting_depth,
+        }
+
+
 @dataclass
 class IndexedSymbol:
     """A single SCIP symbol attached to a code chunk."""
@@ -228,6 +267,7 @@ class IndexedChunk:
     line_start: int
     line_end: int
     symbols: List[IndexedSymbol] = field(default_factory=list)
+    ast_metadata: Optional[ASTMetadata] = None
 
     # ── Friction-scoring helpers ─────────────────────────────────
     @property
@@ -268,4 +308,5 @@ class IndexedChunk:
             "definition_count": self.definition_count,
             "relationship_count": self.relationship_count,
             "complexity_hint": self.complexity_hint,
+            "ast_metadata": self.ast_metadata.to_dict() if self.ast_metadata else None,
         }

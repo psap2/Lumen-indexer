@@ -1,12 +1,16 @@
 """
 Code ingestion pipeline — reads source files, splits them, and enriches
-each chunk with SCIP symbol intelligence.
+each chunk with SCIP symbol intelligence and tree-sitter AST metadata.
 
 This module intentionally keeps tree-sitter optional: when the
 ``llama-index-core`` ``CodeSplitter`` is available **and** the tree-sitter
 grammar for the target language is installed, we use language-aware
 splitting.  Otherwise we fall back to a simple line-based splitter so
 the pipeline never hard-fails on a missing native dependency.
+
+AST metadata extraction runs independently of both the splitter and SCIP.
+It uses tree-sitter directly to parse each chunk and extract structural
+context (signatures, imports, complexity) that is always available.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from lumen.config import (
     IndexedSymbol,
     LANGUAGE_REGISTRY,
 )
+from lumen.ingestion.ast_extract import ast_metadata_text, extract_ast_metadata
 from lumen.scip_parser.parser import ParsedIndex, ParsedSymbol
 
 logger = logging.getLogger(__name__)
@@ -304,14 +309,20 @@ def ingest_repository(
         for start_line, end_line, chunk_text in raw_chunks:
             cid = _chunk_id(rel_path, start_line, end_line)
 
+            # SCIP enrichment (may be None if SCIP wasn't available)
             scip_symbols = _enrich_with_scip(
                 parsed_index, rel_path, start_line, end_line
             )
             symbol_header = _symbol_metadata_text(scip_symbols)
 
-            # The embedded text includes the symbol header so the
-            # vector representation captures semantic relationships.
-            enriched_text = f"{symbol_header}{chunk_text}"
+            # AST metadata (always available via tree-sitter)
+            ast_meta = extract_ast_metadata(chunk_text, lang)
+            ast_header = ast_metadata_text(ast_meta)
+
+            # The embedded text includes both headers so the
+            # vector representation captures structural + semantic
+            # relationships.
+            enriched_text = f"{ast_header}{symbol_header}{chunk_text}"
 
             node = TextNode(
                 text=enriched_text,
@@ -338,6 +349,8 @@ def ingest_repository(
                         }
                     ),
                     "chunk_id": cid,
+                    "ast_complexity": ast_meta.complexity if ast_meta else 0,
+                    "ast_node_types": ",".join(ast_meta.node_types) if ast_meta else "",
                 },
                 excluded_embed_metadata_keys=["chunk_id", "repo_id"],
                 excluded_llm_metadata_keys=["chunk_id", "repo_id"],
@@ -352,6 +365,7 @@ def ingest_repository(
                 line_start=start_line,
                 line_end=end_line,
                 symbols=scip_symbols,
+                ast_metadata=ast_meta,
             )
             chunks.append(indexed_chunk)
 
