@@ -1,7 +1,6 @@
 # Lumen — Repository Indexing Service
 # ────────────────────────────────────
-# Pinned to minimum versions that are tested and known to work together.
-# Run: pip install -r requirements.txt
+
 
 # Core framework — llama-index v0.14+ (the 0.11 API is incompatible)
 llama-index-core>=0.14.0,<0.15

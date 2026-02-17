@@ -8,6 +8,7 @@ are tested with mocked sessions. Pure functions are tested directly.
 from __future__ import annotations
 
 import hashlib
+import subprocess
 import uuid
 from pathlib import Path
 from typing import List
@@ -17,8 +18,14 @@ import pytest
 
 from lumen.incremental import (
     FileChange,
+    _get_head_commit,
+    _git_diff_files,
+    _git_untracked_files,
+    _is_commit_reachable,
+    _is_git_repo,
     changed_file_paths,
     compute_file_hash,
+    detect_file_changes_git,
     get_change_summary,
     stale_file_paths,
 )
@@ -172,3 +179,278 @@ class TestStaleFilePaths:
             FileChange(path="b.py", status="unchanged", content_hash="b"),
         ]
         assert stale_file_paths(changes) == set()
+
+
+# ── _is_git_repo ─────────────────────────────────────────────────────
+
+
+class TestIsGitRepo:
+    def test_true_for_git_repo(self, tmp_path: Path):
+        (tmp_path / ".git").mkdir()
+        assert _is_git_repo(tmp_path) is True
+
+    def test_false_for_non_git_dir(self, tmp_path: Path):
+        assert _is_git_repo(tmp_path) is False
+
+    def test_false_when_git_is_file(self, tmp_path: Path):
+        (tmp_path / ".git").write_text("not a directory")
+        assert _is_git_repo(tmp_path) is False
+
+
+# ── _get_head_commit ─────────────────────────────────────────────────
+
+
+class TestGetHeadCommit:
+    def test_returns_sha_for_real_git_repo(self, tmp_path: Path):
+        """Create a real git repo with a commit and verify we get a SHA."""
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+        (tmp_path / "file.txt").write_text("hello")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+
+        sha = _get_head_commit(tmp_path)
+        assert sha is not None
+        assert len(sha) == 40  # Full SHA-1 hex
+
+    def test_returns_none_for_non_git_dir(self, tmp_path: Path):
+        assert _get_head_commit(tmp_path) is None
+
+
+# ── _is_commit_reachable ─────────────────────────────────────────────
+
+
+class TestIsCommitReachable:
+    def test_reachable_commit(self, tmp_path: Path):
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+        (tmp_path / "file.txt").write_text("hello")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+
+        sha = _get_head_commit(tmp_path)
+        assert _is_commit_reachable(tmp_path, sha) is True
+
+    def test_unreachable_commit(self, tmp_path: Path):
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        assert _is_commit_reachable(tmp_path, "deadbeef" * 5) is False
+
+    def test_non_git_dir(self, tmp_path: Path):
+        assert _is_commit_reachable(tmp_path, "abc123") is False
+
+
+# ── _git_diff_files ──────────────────────────────────────────────────
+
+
+def _init_git_repo(path: Path) -> str:
+    """Helper: create a git repo with one commit, return the SHA."""
+    subprocess.run(["git", "init"], cwd=str(path), capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=str(path), capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=str(path), capture_output=True,
+    )
+    (path / "main.py").write_text("print('hello')\n")
+    (path / "utils.py").write_text("def add(a, b): return a + b\n")
+    subprocess.run(["git", "add", "."], cwd=str(path), capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=str(path), capture_output=True,
+    )
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(path), capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
+class TestGitDiffFiles:
+    def test_detects_modified_file(self, tmp_path: Path):
+        base_sha = _init_git_repo(tmp_path)
+        (tmp_path / "main.py").write_text("print('modified')\n")
+        diff = _git_diff_files(tmp_path, base_sha)
+        assert diff is not None
+        assert "main.py" in diff
+        assert diff["main.py"] == "M"
+
+    def test_detects_deleted_file(self, tmp_path: Path):
+        base_sha = _init_git_repo(tmp_path)
+        (tmp_path / "utils.py").unlink()
+        diff = _git_diff_files(tmp_path, base_sha)
+        assert diff is not None
+        assert "utils.py" in diff
+        assert diff["utils.py"] == "D"
+
+    def test_detects_added_file(self, tmp_path: Path):
+        base_sha = _init_git_repo(tmp_path)
+        (tmp_path / "new_file.py").write_text("x = 1\n")
+        subprocess.run(["git", "add", "new_file.py"], cwd=str(tmp_path), capture_output=True)
+        diff = _git_diff_files(tmp_path, base_sha)
+        assert diff is not None
+        assert "new_file.py" in diff
+        assert diff["new_file.py"] == "A"
+
+    def test_no_changes_returns_empty(self, tmp_path: Path):
+        base_sha = _init_git_repo(tmp_path)
+        diff = _git_diff_files(tmp_path, base_sha)
+        assert diff is not None
+        assert diff == {}
+
+    def test_returns_none_for_non_git_dir(self, tmp_path: Path):
+        assert _git_diff_files(tmp_path, "abc123") is None
+
+
+# ── _git_untracked_files ─────────────────────────────────────────────
+
+
+class TestGitUntrackedFiles:
+    def test_finds_untracked_files(self, tmp_path: Path):
+        _init_git_repo(tmp_path)
+        (tmp_path / "untracked.py").write_text("# new\n")
+        untracked = _git_untracked_files(tmp_path)
+        assert untracked is not None
+        assert "untracked.py" in untracked
+
+    def test_no_untracked_returns_empty(self, tmp_path: Path):
+        _init_git_repo(tmp_path)
+        untracked = _git_untracked_files(tmp_path)
+        assert untracked is not None
+        assert untracked == []
+
+    def test_returns_none_for_non_git_dir(self, tmp_path: Path):
+        assert _git_untracked_files(tmp_path) is None
+
+
+# ── detect_file_changes_git ──────────────────────────────────────────
+
+
+class TestDetectFileChangesGit:
+    """End-to-end tests using real temporary git repos."""
+
+    EXTENSIONS = frozenset({".py", ".ts"})
+
+    def test_detects_modified_and_new(self, tmp_path: Path):
+        base_sha = _init_git_repo(tmp_path)
+        # Modify tracked file
+        (tmp_path / "main.py").write_text("print('changed')\n")
+        # Add untracked file
+        (tmp_path / "new_module.py").write_text("x = 42\n")
+
+        changes = detect_file_changes_git(
+            tmp_path, base_sha, self.EXTENSIONS,
+        )
+        assert changes is not None
+        paths = {c.path: c.status for c in changes}
+        assert paths["main.py"] == "modified"
+        assert paths["new_module.py"] == "new"
+        # utils.py is unchanged — should not appear
+        assert "utils.py" not in paths
+
+    def test_detects_deletion(self, tmp_path: Path):
+        base_sha = _init_git_repo(tmp_path)
+        (tmp_path / "utils.py").unlink()
+
+        changes = detect_file_changes_git(
+            tmp_path, base_sha, self.EXTENSIONS,
+        )
+        assert changes is not None
+        paths = {c.path: c.status for c in changes}
+        assert paths["utils.py"] == "deleted"
+
+    def test_filters_by_extension(self, tmp_path: Path):
+        base_sha = _init_git_repo(tmp_path)
+        (tmp_path / "readme.md").write_text("# Hello\n")  # Not in extensions
+
+        changes = detect_file_changes_git(
+            tmp_path, base_sha, self.EXTENSIONS,
+        )
+        assert changes is not None
+        assert all(c.path != "readme.md" for c in changes)
+
+    def test_filters_by_ignore_patterns(self, tmp_path: Path):
+        base_sha = _init_git_repo(tmp_path)
+        nm = tmp_path / "node_modules"
+        nm.mkdir()
+        (nm / "dep.py").write_text("x = 1\n")
+
+        changes = detect_file_changes_git(
+            tmp_path, base_sha, self.EXTENSIONS,
+            ignore_patterns=["node_modules"],
+        )
+        assert changes is not None
+        assert all("node_modules" not in c.path for c in changes)
+
+    def test_returns_none_for_unreachable_commit(self, tmp_path: Path):
+        _init_git_repo(tmp_path)
+        result = detect_file_changes_git(
+            tmp_path, "deadbeef" * 5, self.EXTENSIONS,
+        )
+        assert result is None
+
+    def test_returns_none_for_non_git_dir(self, tmp_path: Path):
+        result = detect_file_changes_git(
+            tmp_path, "abc123", self.EXTENSIONS,
+        )
+        assert result is None
+
+    def test_content_hash_computed_for_changed_files(self, tmp_path: Path):
+        base_sha = _init_git_repo(tmp_path)
+        (tmp_path / "main.py").write_text("print('new')\n")
+
+        changes = detect_file_changes_git(
+            tmp_path, base_sha, self.EXTENSIONS,
+        )
+        assert changes is not None
+        modified = [c for c in changes if c.path == "main.py"][0]
+        assert modified.content_hash != ""
+        expected = hashlib.sha256(b"print('new')\n").hexdigest()
+        assert modified.content_hash == expected
+
+    def test_deleted_file_has_empty_hash(self, tmp_path: Path):
+        base_sha = _init_git_repo(tmp_path)
+        (tmp_path / "utils.py").unlink()
+
+        changes = detect_file_changes_git(
+            tmp_path, base_sha, self.EXTENSIONS,
+        )
+        deleted = [c for c in changes if c.path == "utils.py"][0]
+        assert deleted.content_hash == ""
+
+
+# ── Fallback behavior ────────────────────────────────────────────────
+
+
+class TestGitFallback:
+    """Verify that detect_file_changes_git returns None when it should."""
+
+    def test_non_git_repo_returns_none(self, tmp_path: Path):
+        assert detect_file_changes_git(tmp_path, "abc", frozenset({".py"})) is None
+
+    def test_missing_commit_returns_none(self, tmp_path: Path):
+        _init_git_repo(tmp_path)
+        assert detect_file_changes_git(
+            tmp_path, "0" * 40, frozenset({".py"}),
+        ) is None

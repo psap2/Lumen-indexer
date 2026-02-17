@@ -458,13 +458,18 @@ def _run_indexing_pipeline(
         # Save file states so incremental re-index has a baseline
         # (skip for cloned repos — they don't persist on disk)
         if not clone_path:
-            from lumen.incremental import detect_file_changes, save_file_states
+            from lumen.incremental import (
+                detect_file_changes,
+                save_file_states,
+                save_last_indexed_commit,
+            )
 
             initial_changes = detect_file_changes(repo_id, repo_path, all_extensions)
             chunk_counts: dict[str, int] = {}
             for c in chunks:
                 chunk_counts[c.file_path] = chunk_counts.get(c.file_path, 0) + 1
             save_file_states(repo_id, initial_changes, chunk_counts)
+            save_last_indexed_commit(repo_id, repo_path)
 
         # Invalidate query cache so next query picks up new data
         invalidate_index_cache()
