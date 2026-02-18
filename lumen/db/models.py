@@ -56,6 +56,7 @@ class Repository(Base):
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     symbol_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_indexed_commit: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -92,6 +93,7 @@ class Repository(Base):
             "chunk_count": self.chunk_count,
             "symbol_count": self.symbol_count,
             "error_message": self.error_message,
+            "last_indexed_commit": self.last_indexed_commit,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

@@ -1,15 +1,26 @@
 """
 Incremental indexing — file-level change detection.
 
-Computes SHA-256 content hashes for every source file and compares
-them against previously stored state so the indexing pipeline can
-skip files that have not changed since the last run.
+Two strategies for detecting changed files:
+
+1. **Git-diff (fast path):** When the repo is a git repo and we have a
+   stored commit SHA from the last index, we run ``git diff`` to find
+   changed files instantly.  This is O(1) regardless of repo size.
+
+2. **Hash-based (fallback):** Walk every source file and compute a
+   SHA-256 content hash, comparing against stored ``FileIndexState``
+   rows.  This is O(N) in the number of files but works for non-git
+   repos and as a safety net.
+
+The public ``detect_file_changes()`` function tries git-diff first and
+falls back to hash-based automatically.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import subprocess
 import uuid
 from collections import Counter
 from dataclasses import dataclass
@@ -18,7 +29,7 @@ from pathlib import Path
 from typing import Dict, List, Literal, Optional
 
 from lumen.config import DEFAULT_IGNORE_PATTERNS
-from lumen.db.models import FileIndexState
+from lumen.db.models import FileIndexState, Repository
 from lumen.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -51,7 +62,199 @@ def compute_file_hash(filepath: Path) -> str:
     return h.hexdigest()
 
 
-# ── Change detection ─────────────────────────────────────────────────
+# ── Git helpers ──────────────────────────────────────────────────────
+
+
+def _is_git_repo(repo_root: Path) -> bool:
+    """Return ``True`` if *repo_root* contains a ``.git`` directory."""
+    return (repo_root / ".git").is_dir()
+
+
+def _get_head_commit(repo_root: Path) -> Optional[str]:
+    """Return the current HEAD commit SHA, or ``None`` on failure."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def _is_commit_reachable(repo_root: Path, commit_sha: str) -> bool:
+    """Return ``True`` if *commit_sha* exists in the repo's object store."""
+    try:
+        result = subprocess.run(
+            ["git", "cat-file", "-t", commit_sha],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0 and result.stdout.strip() == "commit"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _git_diff_files(
+    repo_root: Path,
+    base_commit: str,
+) -> Optional[Dict[str, str]]:
+    """
+    Run ``git diff --name-status <base_commit>`` to find tracked files
+    that differ between *base_commit* and the current working tree.
+
+    Returns ``{relative_path: status}`` where status is one of
+    ``A`` (added), ``M`` (modified), ``D`` (deleted), ``R`` (renamed).
+    Returns ``None`` on failure.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-status", base_commit],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+    changes: Dict[str, str] = {}
+    for line in result.stdout.strip().splitlines():
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status = parts[0]
+        # Renames: R100\told_path\tnew_path
+        if status.startswith("R"):
+            old_path = parts[1]
+            new_path = parts[2] if len(parts) > 2 else parts[1]
+            changes[old_path] = "D"
+            changes[new_path] = "A"
+        else:
+            changes[parts[1]] = status[0]  # Take first char (e.g. "M", "A", "D")
+
+    return changes
+
+
+def _git_untracked_files(repo_root: Path) -> Optional[List[str]]:
+    """
+    Run ``git ls-files --others --exclude-standard`` to find untracked
+    files (new files not yet added to git).
+
+    Returns a list of relative paths, or ``None`` on failure.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+    return [
+        line for line in result.stdout.strip().splitlines() if line
+    ]
+
+
+# ── Git-diff change detection (fast path) ────────────────────────────
+
+
+def detect_file_changes_git(
+    repo_root: Path,
+    last_commit: str,
+    extensions: frozenset[str],
+    ignore_patterns: Optional[List[str]] = None,
+) -> Optional[List[FileChange]]:
+    """
+    Detect changed files using ``git diff`` against a stored commit.
+
+    Returns a list of :class:`FileChange` objects for files that are
+    new, modified, or deleted — but does **not** enumerate unchanged
+    files (unlike the hash-based approach).  This is fine because
+    downstream consumers only care about non-unchanged entries.
+
+    Returns ``None`` if git operations fail (caller should fall back
+    to hash-based detection).
+    """
+    if ignore_patterns is None:
+        ignore_patterns = list(DEFAULT_IGNORE_PATTERNS)
+
+    if not _is_git_repo(repo_root):
+        return None
+
+    if not _is_commit_reachable(repo_root, last_commit):
+        logger.warning(
+            "Stored commit %s not reachable — falling back to hash-based detection.",
+            last_commit[:12],
+        )
+        return None
+
+    # Get tracked file changes
+    diff_files = _git_diff_files(repo_root, last_commit)
+    if diff_files is None:
+        return None
+
+    # Get untracked (new) files
+    untracked = _git_untracked_files(repo_root)
+    if untracked is None:
+        return None
+
+    changes: List[FileChange] = []
+
+    # Map git statuses → FileChange statuses
+    _STATUS_MAP = {"A": "new", "M": "modified", "D": "deleted"}
+
+    for rel_path, git_status in diff_files.items():
+        # Filter by extension
+        suffix = Path(rel_path).suffix.lower()
+        if suffix not in extensions:
+            continue
+        # Filter by ignore patterns
+        if _should_ignore(Path(rel_path), ignore_patterns):
+            continue
+
+        fc_status = _STATUS_MAP.get(git_status, "modified")
+        content_hash = ""
+        if fc_status != "deleted":
+            full_path = repo_root / rel_path
+            if full_path.is_file():
+                content_hash = compute_file_hash(full_path)
+        changes.append(FileChange(path=rel_path, status=fc_status, content_hash=content_hash))
+
+    # Add untracked files as "new"
+    for rel_path in untracked:
+        if rel_path in diff_files:
+            continue  # Already handled above
+        suffix = Path(rel_path).suffix.lower()
+        if suffix not in extensions:
+            continue
+        if _should_ignore(Path(rel_path), ignore_patterns):
+            continue
+        full_path = repo_root / rel_path
+        if full_path.is_file():
+            content_hash = compute_file_hash(full_path)
+            changes.append(FileChange(path=rel_path, status="new", content_hash=content_hash))
+
+    return changes
+
+
+# ── Hash-based change detection (fallback) ───────────────────────────
 
 
 def _should_ignore(path: Path, ignore: List[str]) -> bool:
@@ -86,14 +289,34 @@ def detect_file_changes(
     ignore_patterns: Optional[List[str]] = None,
 ) -> List[FileChange]:
     """
-    Compare current on-disk files against stored ``FileIndexState`` rows
-    to produce a categorised list of changes.
+    Compare current on-disk files against the last indexed state to
+    produce a categorised list of changes.
+
+    Tries the **git-diff fast path** first (O(1) via ``git diff``).
+    Falls back to **hash-based detection** (O(N) full scan) when git
+    is unavailable, the stored commit is missing, or git commands fail.
 
     Returns a list of :class:`FileChange` — one per file that is new,
     modified, deleted, or unchanged.
     """
     if ignore_patterns is None:
         ignore_patterns = list(DEFAULT_IGNORE_PATTERNS)
+
+    # ── Try git-diff fast path ────────────────────────────────────
+    last_commit = _load_last_indexed_commit(repo_id)
+    if last_commit and _is_git_repo(repo_root):
+        result = detect_file_changes_git(
+            repo_root, last_commit, extensions, ignore_patterns,
+        )
+        if result is not None:
+            logger.info(
+                "Used git-diff for change detection (fast path, base=%s)",
+                last_commit[:12],
+            )
+            return result
+
+    # ── Fallback: hash-based detection ────────────────────────────
+    logger.info("Using hash-based change detection (full scan)")
 
     # 1. Compute current file hashes
     current_files = _collect_files_with_hashes(repo_root, extensions, ignore_patterns)
@@ -205,3 +428,41 @@ def changed_file_paths(changes: List[FileChange]) -> set[str]:
 def stale_file_paths(changes: List[FileChange]) -> set[str]:
     """Return the set of relative paths for modified + deleted files."""
     return {c.path for c in changes if c.status in ("modified", "deleted")}
+
+
+# ── Commit SHA persistence ───────────────────────────────────────────
+
+
+def _load_last_indexed_commit(repo_id: uuid.UUID) -> Optional[str]:
+    """Read the stored ``last_indexed_commit`` for a repository."""
+    with get_session() as session:
+        repo = session.get(Repository, repo_id)
+        if repo is None:
+            return None
+        return repo.last_indexed_commit
+
+
+def save_last_indexed_commit(
+    repo_id: uuid.UUID,
+    repo_root: Path,
+) -> None:
+    """
+    Resolve the current HEAD commit and persist it to the repository row.
+
+    Called after a successful index (full or incremental) so the next
+    incremental run can use git-diff against this commit.  Silently
+    skips if the repo is not a git repo.
+    """
+    if not _is_git_repo(repo_root):
+        return
+
+    sha = _get_head_commit(repo_root)
+    if sha is None:
+        return
+
+    with get_session() as session:
+        repo = session.get(Repository, repo_id)
+        if repo is not None:
+            repo.last_indexed_commit = sha
+
+    logger.info("Saved last_indexed_commit=%s for repo %s", sha[:12], repo_id)

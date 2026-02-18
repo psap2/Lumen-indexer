@@ -431,7 +431,11 @@ def incremental_index(
 
     save_file_states(repo_id, changes, chunk_counts)
 
-    # ── 7. Recount totals and update repo status ──────────────────
+    # ── 7. Save git commit SHA for next incremental run ───────────
+    from lumen.incremental import save_last_indexed_commit
+    save_last_indexed_commit(repo_id, repo_root)
+
+    # ── 8. Recount totals and update repo status ──────────────────
     total_chunks, total_symbols = get_repo_totals(repo_id)
     update_repository_status(
         repo_id, "ready",
@@ -761,6 +765,7 @@ def _main_inner(args, repo_root: Path, clone_path: Optional[Path]) -> None:
             from lumen.incremental import (
                 detect_file_changes,
                 save_file_states,
+                save_last_indexed_commit,
             )
 
             initial_changes = detect_file_changes(
@@ -770,6 +775,7 @@ def _main_inner(args, repo_root: Path, clone_path: Optional[Path]) -> None:
             for c in chunks:
                 chunk_counts[c.file_path] = chunk_counts.get(c.file_path, 0) + 1
             save_file_states(repo_id, initial_changes, chunk_counts)
+            save_last_indexed_commit(repo_id, repo_root)
 
     except Exception:
         update_repository_status(repo_id, "failed", error_message="Embedding failed")
