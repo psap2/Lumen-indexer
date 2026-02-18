@@ -247,8 +247,12 @@ async def reindex_repo(repo_id: str, background_tasks: BackgroundTasks):
 
     Only files that have changed since the last index run will be
     re-processed.  The repo must already have been indexed at least once.
+    
+    Supports both local paths and Git URLs. For Git URLs, the repo will
+    be cloned temporarily for indexing.
     """
     from lumen.storage.supabase_store import get_repository, update_repository_status
+    from lumen.git_clone import is_git_url, clone_repo, repo_name_from_url
 
     try:
         uid = uuid.UUID(repo_id)
@@ -259,12 +263,26 @@ async def reindex_repo(repo_id: str, background_tasks: BackgroundTasks):
     if repo is None:
         raise HTTPException(status_code=404, detail="Repository not found.")
 
-    repo_path = Path(repo["path_or_url"])
-    if not repo_path.is_dir():
-        raise HTTPException(
-            status_code=400,
-            detail=f"Repository path no longer exists on disk: {repo_path}",
-        )
+    path_or_url = repo["path_or_url"]
+    clone_path = None
+
+    # ── Handle Git URLs ───────────────────────────────────────────
+    if is_git_url(path_or_url):
+        try:
+            clone_path = clone_repo(path_or_url, branch=None)  # Use default branch
+            repo_path = clone_path
+            repo_display_name = repo_name_from_url(path_or_url)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to clone repository: {exc}")
+    else:
+        # ── Handle local paths ────────────────────────────────────
+        repo_path = Path(path_or_url).resolve()
+        if not repo_path.is_dir():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Repository path no longer exists on disk: {repo_path}",
+            )
+        repo_display_name = repo_path.name
 
     update_repository_status(uid, "indexing")
 
@@ -276,13 +294,81 @@ async def reindex_repo(repo_id: str, background_tasks: BackgroundTasks):
         repo_id=uid,
         repo_path=repo_path,
         language=language,
+        clone_path=clone_path,
     )
 
     return IndexResponse(
         repo_id=repo_id,
         status="indexing",
         message=(
-            f"Incremental re-index started for {repo_path.name}. "
+            f"Incremental re-index started for {repo_display_name}. "
+            f"Poll GET /repos/{repo_id} for status."
+        ),
+    )
+
+
+@router.put("/repos/{repo_id}/reindex-full", response_model=IndexResponse)
+async def reindex_repo_full(repo_id: str, background_tasks: BackgroundTasks):
+    """
+    Trigger a full re-index of an existing repository.
+
+    Re-processes all files, not just changed ones. This is useful when
+    you want to completely rebuild the index from scratch.
+    
+    Supports both local paths and Git URLs. For Git URLs, the repo will
+    be cloned temporarily for indexing.
+    """
+    from lumen.storage.supabase_store import get_repository, update_repository_status
+    from lumen.git_clone import is_git_url, clone_repo, repo_name_from_url
+
+    try:
+        uid = uuid.UUID(repo_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid repo_id (must be UUID).")
+
+    repo = get_repository(uid)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="Repository not found.")
+
+    path_or_url = repo["path_or_url"]
+    clone_path = None
+
+    # ── Handle Git URLs ───────────────────────────────────────────
+    if is_git_url(path_or_url):
+        try:
+            clone_path = clone_repo(path_or_url, branch=None)  # Use default branch
+            repo_path = clone_path
+            repo_display_name = repo_name_from_url(path_or_url)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to clone repository: {exc}")
+    else:
+        # ── Handle local paths ────────────────────────────────────
+        repo_path = Path(path_or_url).resolve()
+        if not repo_path.is_dir():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Repository path no longer exists on disk: {repo_path}",
+            )
+        repo_display_name = repo_path.name
+
+    update_repository_status(uid, "indexing")
+
+    # Determine language from the stored repo record
+    language = ",".join(repo.get("languages", [])) or "auto"
+
+    background_tasks.add_task(
+        _run_indexing_pipeline,
+        repo_id=uid,
+        repo_path=repo_path,
+        language=language,
+        clone_path=clone_path,
+    )
+
+    return IndexResponse(
+        repo_id=repo_id,
+        status="indexing",
+        message=(
+            f"Full re-index started for {repo_display_name}. "
             f"Poll GET /repos/{repo_id} for status."
         ),
     )
@@ -497,11 +583,14 @@ def _run_incremental_pipeline(
     repo_id: uuid.UUID,
     repo_path: Path,
     language: str,
+    clone_path: Path | None = None,
 ) -> None:
     """
     Execute incremental re-indexing in a background thread.
 
     Only files that have changed since the last run are re-processed.
+    When *clone_path* is set, the cloned directory is deleted in the
+    ``finally`` block regardless of success or failure.
     """
     import traceback
 
@@ -551,3 +640,9 @@ def _run_incremental_pipeline(
             )
         except Exception:
             logger.error("Could not update repo status to 'failed'.")
+
+    finally:
+        # Always clean up cloned repos
+        if clone_path:
+            from lumen.git_clone import cleanup_clone
+            cleanup_clone(clone_path)
