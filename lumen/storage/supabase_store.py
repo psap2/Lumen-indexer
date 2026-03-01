@@ -181,30 +181,34 @@ def persist_chunks(
     Bulk-insert ``IndexedChunk`` data into the ``code_chunks`` and
     ``symbols`` tables.  Returns the number of chunks written.
     """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
     with get_session() as session:
         # Delete old data for this repo (allows re-index)
         session.query(Symbol).filter(Symbol.repo_id == repo_id).delete()
         session.query(CodeChunk).filter(CodeChunk.repo_id == repo_id).delete()
 
-        chunk_rows = []
+        chunk_dicts = []
         symbol_rows = []
 
         for chunk in chunks:
-            chunk_rows.append(
-                CodeChunk(
-                    repo_id=repo_id,
-                    chunk_id=chunk.chunk_id,
-                    file_path=chunk.file_path,
-                    language=chunk.language,
-                    code=chunk.code,
-                    line_start=chunk.line_start,
-                    line_end=chunk.line_end,
-                    symbol_count=chunk.symbol_count,
-                    definition_count=chunk.definition_count,
-                    relationship_count=chunk.relationship_count,
-                    complexity_hint=chunk.complexity_hint,
-                    ast_metadata=chunk.ast_metadata.to_dict() if chunk.ast_metadata else None,
-                )
+            chunk_dicts.append(
+                {
+                    "id": uuid.uuid4(),
+                    "repo_id": repo_id,
+                    "chunk_id": chunk.chunk_id,
+                    "file_path": chunk.file_path,
+                    "language": chunk.language,
+                    "code": chunk.code,
+                    "line_start": chunk.line_start,
+                    "line_end": chunk.line_end,
+                    "symbol_count": chunk.symbol_count,
+                    "definition_count": chunk.definition_count,
+                    "relationship_count": chunk.relationship_count,
+                    "complexity_hint": chunk.complexity_hint,
+                    "ast_metadata": chunk.ast_metadata.to_dict() if chunk.ast_metadata else None,
+                    "created_at": datetime.now(timezone.utc),
+                }
             )
             for sym in chunk.symbols:
                 symbol_rows.append(
@@ -222,16 +226,19 @@ def persist_chunks(
                     )
                 )
 
-        session.bulk_save_objects(chunk_rows)
+        if chunk_dicts:
+            stmt = pg_insert(CodeChunk.__table__).values(chunk_dicts)
+            stmt = stmt.on_conflict_do_nothing(index_elements=["repo_id", "chunk_id"])
+            session.execute(stmt)
         session.bulk_save_objects(symbol_rows)
 
     logger.info(
         "Persisted %d chunks and %d symbols for repo %s",
-        len(chunk_rows),
+        len(chunk_dicts),
         len(symbol_rows),
         repo_id,
     )
-    return len(chunk_rows)
+    return len(chunk_dicts)
 
 
 def get_chunks_for_repo(

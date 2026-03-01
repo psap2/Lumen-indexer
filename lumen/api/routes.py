@@ -111,6 +111,11 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
         existing = find_repository_by_path(path_or_url)
         if existing is not None:
             rid = uuid.UUID(existing["id"])
+            if existing.get("status") == "indexing":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Repository {rid} is already being indexed. Poll GET /repos/{rid} for status.",
+                )
             # Normalize the stored URL if it's a git URL
             if clone_path:
                 _normalize_stored_url(rid, normalized_url)
@@ -142,6 +147,11 @@ async def index_repo(req: IndexRequest, background_tasks: BackgroundTasks):
 
     if existing is not None:
         repo_id = uuid.UUID(existing["id"])
+        if existing.get("status") == "indexing":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Repository {repo_id} is already being indexed. Poll GET /repos/{repo_id} for status.",
+            )
         logger.info("Found existing repository %s for %s — re-indexing.", repo_id, path_or_url)
         # Normalize the stored URL if it's a git URL with credentials
         if clone_path and existing.get("path_or_url") != normalized_url:
@@ -263,6 +273,12 @@ async def reindex_repo(repo_id: str, background_tasks: BackgroundTasks):
     if repo is None:
         raise HTTPException(status_code=404, detail="Repository not found.")
 
+    if repo.get("status") == "indexing":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Repository {uid} is already being indexed. Poll GET /repos/{uid} for status.",
+        )
+
     path_or_url = repo["path_or_url"]
     clone_path = None
 
@@ -329,6 +345,12 @@ async def reindex_repo_full(repo_id: str, background_tasks: BackgroundTasks):
     repo = get_repository(uid)
     if repo is None:
         raise HTTPException(status_code=404, detail="Repository not found.")
+
+    if repo.get("status") == "indexing":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Repository {uid} is already being indexed. Poll GET /repos/{uid} for status.",
+        )
 
     path_or_url = repo["path_or_url"]
     clone_path = None
