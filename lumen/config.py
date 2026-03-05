@@ -86,6 +86,20 @@ LANGUAGE_REGISTRY: Dict[str, LanguageProfile] = {
         tree_sitter_lang="ruby",
         install_hint="gem install scip-ruby  (requires Ruby >= 3.0)",
     ),
+    "html": LanguageProfile(
+        name="html",
+        extensions=frozenset({".html", ".htm"}),
+        scip_command=None,  # No practical SCIP indexer for markup
+        tree_sitter_lang="html",
+        install_hint="No SCIP indexer for HTML — indexing proceeds with tree-sitter chunking.",
+    ),
+    "css": LanguageProfile(
+        name="css",
+        extensions=frozenset({".css"}),
+        scip_command=None,  # No practical SCIP indexer for stylesheets
+        tree_sitter_lang="css",
+        install_hint="No SCIP indexer for CSS — indexing proceeds with tree-sitter chunking.",
+    ),
     "cpp": LanguageProfile(
         name="cpp",
         extensions=frozenset({".cpp", ".cc", ".cxx", ".hpp", ".h", ".c"}),
@@ -104,6 +118,7 @@ _LANGUAGE_ALIASES: Dict[str, str] = {
     "golang": "go",
     "rs": "rust",
     "rb": "ruby",
+    "htm": "html",
     "c": "cpp",
     "c++": "cpp",
 }

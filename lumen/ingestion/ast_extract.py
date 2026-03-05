@@ -124,6 +124,34 @@ _LANG_CONFIG: dict[str, dict] = {
         "return_field": None,
         "method_types": {"method", "singleton_method"},
     },
+    "html": {
+        "function_types": set(),
+        "class_types": set(),
+        "import_types": set(),
+        "branch_types": set(),
+        # Record high-value structural blocks as node types.
+        "extra_types": {
+            "element",
+            "script_element",
+            "style_element",
+        },
+        "name_field": "name",
+        "params_field": None,
+        "return_field": None,
+        "method_types": set(),
+    },
+    "css": {
+        "function_types": set(),
+        "class_types": set(),
+        "import_types": {"import_statement"},
+        "branch_types": set(),
+        # Capture top-level stylesheet structure.
+        "extra_types": {"rule_set", "at_rule"},
+        "name_field": "name",
+        "params_field": None,
+        "return_field": None,
+        "method_types": set(),
+    },
     "cpp": {
         "function_types": {"function_definition"},
         "class_types": {"class_specifier", "struct_specifier"},

@@ -49,7 +49,17 @@ class TestLanguageProfile:
 
 class TestLanguageRegistry:
     def test_known_languages(self):
-        expected = {"typescript", "python", "go", "rust", "java", "ruby", "cpp"}
+        expected = {
+            "typescript",
+            "python",
+            "go",
+            "rust",
+            "java",
+            "ruby",
+            "html",
+            "css",
+            "cpp",
+        }
         assert set(LANGUAGE_REGISTRY.keys()) == expected
 
     def test_all_have_extensions(self):
