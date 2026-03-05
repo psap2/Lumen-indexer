@@ -26,7 +26,13 @@ from lumen.config import (
     IndexedChunk,
     PG_EMBED_TABLE,
 )
-from lumen.db.models import CodeChunk, CodeEmbedding, Repository, Symbol
+from lumen.db.models import (
+    CodeChunk,
+    CodeEmbedding,
+    Repository,
+    Symbol,
+    SymbolReference,
+)
 from lumen.db.session import get_session
 
 logger = logging.getLogger(__name__)
@@ -183,6 +189,9 @@ def persist_chunks(
     """
     with get_session() as session:
         # Delete old data for this repo (allows re-index)
+        session.query(SymbolReference).filter(
+            SymbolReference.repo_id == repo_id
+        ).delete()
         session.query(Symbol).filter(Symbol.repo_id == repo_id).delete()
         session.query(CodeChunk).filter(CodeChunk.repo_id == repo_id).delete()
 
@@ -269,6 +278,37 @@ def get_chunks_for_repo(
         ]
 
 
+def get_symbol_references_for_repo(
+    repo_id: uuid.UUID,
+    *,
+    offset: int = 0,
+    limit: int = 200,
+) -> List[Dict[str, Any]]:
+    """Paginated list of symbol references for a repository."""
+    with get_session() as session:
+        rows = (
+            session.query(SymbolReference)
+            .filter(SymbolReference.repo_id == repo_id)
+            .order_by(SymbolReference.file_path, SymbolReference.line, SymbolReference.col)
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "id": str(r.id),
+                "from_symbol_id": r.from_symbol_id,
+                "to_symbol_id": r.to_symbol_id,
+                "file_path": r.file_path,
+                "line": r.line,
+                "col": r.col,
+                "reference_kind": r.reference_kind,
+                "snippet": r.snippet,
+            }
+            for r in rows
+        ]
+
+
 def delete_repo_data(repo_id: uuid.UUID) -> None:
     """Delete all data for a repository (cascades via FK)."""
     with get_session() as session:
@@ -331,6 +371,16 @@ def delete_file_data(
             .delete(synchronize_session="fetch")
         )
 
+        # Delete references for these files
+        ref_deleted = (
+            session.query(SymbolReference)
+            .filter(
+                SymbolReference.repo_id == repo_id,
+                SymbolReference.file_path.in_(file_paths),
+            )
+            .delete(synchronize_session="fetch")
+        )
+
         # Delete embeddings by chunk_id
         emb_deleted = 0
         if chunk_ids:
@@ -355,14 +405,86 @@ def delete_file_data(
 
     logger.info(
         "Deleted stale data for %d files in repo %s: "
-        "%d chunks, %d symbols, %d embeddings",
+        "%d chunks, %d symbols, %d references, %d embeddings",
         len(file_paths),
         repo_id,
         chunk_deleted,
         sym_deleted,
+        ref_deleted,
         emb_deleted,
     )
     return chunk_deleted
+
+
+def persist_symbol_references(
+    repo_id: uuid.UUID,
+    references: List[Dict[str, Any]],
+) -> int:
+    """
+    Replace all symbol references for a repository.
+
+    ``references`` entries must contain:
+      from_symbol_id, to_symbol_id, file_path, line, col, reference_kind, snippet
+    """
+    with get_session() as session:
+        session.query(SymbolReference).filter(
+            SymbolReference.repo_id == repo_id
+        ).delete()
+
+        rows = [
+            SymbolReference(
+                repo_id=repo_id,
+                from_symbol_id=r.get("from_symbol_id", ""),
+                to_symbol_id=r["to_symbol_id"],
+                file_path=r["file_path"],
+                line=r["line"],
+                col=r["col"],
+                reference_kind=r.get("reference_kind", "reference"),
+                snippet=r.get("snippet", ""),
+            )
+            for r in references
+        ]
+        if rows:
+            session.bulk_save_objects(rows)
+
+    logger.info("Persisted %d symbol references for repo %s", len(references), repo_id)
+    return len(references)
+
+
+def persist_symbol_references_incremental(
+    repo_id: uuid.UUID,
+    references: List[Dict[str, Any]],
+) -> int:
+    """
+    Insert symbol references for changed files during incremental re-index.
+
+    Assumes stale references have already been removed via ``delete_file_data``.
+    """
+    if not references:
+        return 0
+
+    with get_session() as session:
+        rows = [
+            SymbolReference(
+                repo_id=repo_id,
+                from_symbol_id=r.get("from_symbol_id", ""),
+                to_symbol_id=r["to_symbol_id"],
+                file_path=r["file_path"],
+                line=r["line"],
+                col=r["col"],
+                reference_kind=r.get("reference_kind", "reference"),
+                snippet=r.get("snippet", ""),
+            )
+            for r in references
+        ]
+        session.bulk_save_objects(rows)
+
+    logger.info(
+        "Persisted (incremental) %d symbol references for repo %s",
+        len(references),
+        repo_id,
+    )
+    return len(references)
 
 
 def persist_chunks_incremental(

@@ -249,6 +249,33 @@ def _merge_parsed_indexes(indexes):
     return merged
 
 
+def _reference_rows(
+    parsed_index,
+    file_filter: Optional[set[str]] = None,
+) -> List[Dict[str, object]]:
+    """Flatten ParsedIndex file references into DB-ready rows."""
+    if parsed_index is None:
+        return []
+
+    rows: List[Dict[str, object]] = []
+    for file_path, refs in parsed_index.file_references.items():
+        if file_filter is not None and file_path not in file_filter:
+            continue
+        for ref in refs:
+            rows.append(
+                {
+                    "from_symbol_id": ref.from_symbol_id,
+                    "to_symbol_id": ref.to_symbol_id,
+                    "file_path": ref.file_path,
+                    "line": ref.line,
+                    "col": ref.col,
+                    "reference_kind": ref.reference_kind,
+                    "snippet": ref.snippet,
+                }
+            )
+    return rows
+
+
 # ── Step 3: Ingest ───────────────────────────────────────────────────
 
 
@@ -345,6 +372,7 @@ def incremental_index(
         delete_file_data,
         get_repo_totals,
         persist_chunks_incremental,
+        persist_symbol_references_incremental,
         update_repository_status,
     )
 
@@ -396,6 +424,7 @@ def incremental_index(
     parsed_index = None
     if parsed_indexes:
         parsed_index = _merge_parsed_indexes(parsed_indexes)
+    reference_rows = _reference_rows(parsed_index, file_filter=new_or_modified)
 
     # ── 3. Delete stale data ────────────────────────────────────────
     # Clean up ALL non-unchanged files.  "New" files may still have
@@ -421,6 +450,8 @@ def incremental_index(
         if nodes:
             persist_chunks_incremental(repo_id, chunks)
             embed_and_persist(nodes, repo_id=repo_id)
+        if reference_rows:
+            persist_symbol_references_incremental(repo_id, reference_rows)
     else:
         chunks = []
 
@@ -700,11 +731,13 @@ def _main_inner(args, repo_root: Path, clone_path: Optional[Path]) -> None:
         parsed_index = _merge_parsed_indexes(parsed_indexes)
     else:
         logger.warning("No SCIP data available — chunks will lack symbol enrichment.")
+    reference_rows = _reference_rows(parsed_index)
 
     # ── Create repository record early so repo_id is available ────
     from lumen.storage.supabase_store import (
         create_repository,
         persist_chunks,
+        persist_symbol_references,
         update_repository_status,
     )
 
@@ -747,6 +780,8 @@ def _main_inner(args, repo_root: Path, clone_path: Optional[Path]) -> None:
 
     try:
         persist_chunks(repo_id, chunks)
+        if reference_rows:
+            persist_symbol_references(repo_id, reference_rows)
         index = embed_and_persist(nodes, repo_id=repo_id)
         total_symbols = sum(c.symbol_count for c in chunks)
         update_repository_status(

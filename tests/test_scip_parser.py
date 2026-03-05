@@ -252,3 +252,76 @@ class TestMergeIndexes:
         assert len(merged.documents) == 2
         assert "a/f()." in merged.symbol_table
         assert "b/g()." in merged.symbol_table
+
+
+class TestReferenceExtraction:
+    def test_builds_references_from_occurrences(self):
+        doc = ParsedDocument(
+            relative_path="src/main.py",
+            language="python",
+            text=(
+                "def foo():\n"
+                "    bar()\n"
+                "    return baz\n"
+            ),
+            symbols=[
+                ParsedSymbol(symbol_id="pkg/main.py/foo().", kind="Function", display_name="foo"),
+                ParsedSymbol(symbol_id="pkg/main.py/bar().", kind="Function", display_name="bar"),
+            ],
+            occurrences=[
+                # Definition: foo
+                SymbolOccurrence(
+                    symbol="pkg/main.py/foo().",
+                    start_line=0,
+                    start_char=4,
+                    end_line=0,
+                    end_char=7,
+                    is_definition=True,
+                ),
+                # Usage: bar() call inside foo
+                SymbolOccurrence(
+                    symbol="pkg/main.py/bar().",
+                    start_line=1,
+                    start_char=4,
+                    end_line=1,
+                    end_char=7,
+                    is_definition=False,
+                    enclosing_start_line=0,
+                    enclosing_end_line=2,
+                ),
+                # Usage: import-like occurrence
+                SymbolOccurrence(
+                    symbol="external/pkg/Baz#",
+                    start_line=2,
+                    start_char=11,
+                    end_line=2,
+                    end_char=14,
+                    is_definition=False,
+                    is_import=True,
+                    enclosing_start_line=0,
+                    enclosing_end_line=2,
+                ),
+            ],
+        )
+        idx = ParsedIndex(documents=[doc])
+        idx.build_lookup_tables()
+
+        refs = idx.references_in_file("src/main.py")
+        assert len(refs) == 2
+
+        first = refs[0]
+        assert first.from_symbol_id == "pkg/main.py/foo()."
+        assert first.to_symbol_id == "pkg/main.py/bar()."
+        assert first.reference_kind == "reference"
+        assert first.line == 1
+        assert first.col == 4
+        assert "bar()" in first.snippet
+
+        second = refs[1]
+        assert second.reference_kind == "import"
+        assert second.to_symbol_id == "external/pkg/Baz#"
+
+    def test_returns_empty_for_file_without_usages(self, sample_parsed_index: ParsedIndex):
+        idx = sample_parsed_index
+        refs = idx.references_in_file("src/main.py")
+        assert refs == []

@@ -517,6 +517,21 @@ def _run_indexing_pipeline(
         parsed_index = None
         if parsed_indexes:
             parsed_index = _merge_parsed_indexes(parsed_indexes)
+        reference_rows = []
+        if parsed_index is not None:
+            for refs in parsed_index.file_references.values():
+                for ref in refs:
+                    reference_rows.append(
+                        {
+                            "from_symbol_id": ref.from_symbol_id,
+                            "to_symbol_id": ref.to_symbol_id,
+                            "file_path": ref.file_path,
+                            "line": ref.line,
+                            "col": ref.col,
+                            "reference_kind": ref.reference_kind,
+                            "snippet": ref.snippet,
+                        }
+                    )
 
         # ── Ingest ───────────────────────────────────────────────
         all_extensions = frozenset().union(*(p.extensions for p in profiles))
@@ -524,8 +539,13 @@ def _run_indexing_pipeline(
         logger.info("Ingested %d chunks for %s", len(chunks), repo_path.name)
 
         # ── Persist structured data ──────────────────────────────
-        from lumen.storage.supabase_store import persist_chunks
+        from lumen.storage.supabase_store import (
+            persist_chunks,
+            persist_symbol_references,
+        )
         persist_chunks(repo_id, chunks)
+        if reference_rows:
+            persist_symbol_references(repo_id, reference_rows)
 
         # ── Embed + persist vectors ──────────────────────────────
         from lumen.storage.supabase_store import build_index as sb_build

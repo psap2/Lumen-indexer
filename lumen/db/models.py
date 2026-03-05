@@ -75,6 +75,9 @@ class Repository(Base):
     symbols: Mapped[List["Symbol"]] = relationship(
         back_populates="repository", cascade="all, delete-orphan"
     )
+    references: Mapped[List["SymbolReference"]] = relationship(
+        back_populates="repository", cascade="all, delete-orphan"
+    )
     embeddings: Mapped[List["CodeEmbedding"]] = relationship(
         back_populates="repository", cascade="all, delete-orphan"
     )
@@ -177,6 +180,47 @@ class Symbol(Base):
 
     # Relationships
     repository: Mapped["Repository"] = relationship(back_populates="symbols")
+
+
+class SymbolReference(Base):
+    """
+    A symbol usage edge with exact source location.
+
+    Stores ``from_symbol_id -> to_symbol_id`` references extracted from
+    SCIP occurrences so downstream systems can perform call-chain and
+    find-references style traversals with line/column precision.
+    """
+
+    __tablename__ = "symbol_references"
+    __table_args__ = (
+        Index("idx_symbol_refs_repo", "repo_id"),
+        Index("idx_symbol_refs_from", "repo_id", "from_symbol_id"),
+        Index("idx_symbol_refs_to", "repo_id", "to_symbol_id"),
+        Index("idx_symbol_refs_file_loc", "repo_id", "file_path", "line"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    repo_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("repositories.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    from_symbol_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    to_symbol_id: Mapped[str] = mapped_column(Text, nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    line: Mapped[int] = mapped_column(Integer, nullable=False)
+    col: Mapped[int] = mapped_column(Integer, nullable=False)
+    reference_kind: Mapped[str] = mapped_column(Text, nullable=False, default="reference")
+    snippet: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    repository: Mapped["Repository"] = relationship(back_populates="references")
 
 
 # ── Code Embeddings ──────────────────────────────────────────────────

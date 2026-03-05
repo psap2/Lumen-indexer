@@ -89,6 +89,24 @@ class ParsedDocument:
 
 
 @dataclass
+class ParsedReference:
+    """
+    A resolved symbol reference with exact source location.
+
+    ``from_symbol_id`` can be empty when we cannot confidently resolve
+    the enclosing symbol from SCIP ranges.
+    """
+
+    from_symbol_id: str
+    to_symbol_id: str
+    file_path: str
+    line: int
+    col: int
+    reference_kind: str
+    snippet: str = ""
+
+
+@dataclass
 class ParsedIndex:
     """The entire SCIP index in memory."""
 
@@ -102,6 +120,7 @@ class ParsedIndex:
     symbol_table: Dict[str, ParsedSymbol] = field(default_factory=dict)
     file_symbols: Dict[str, List[ParsedSymbol]] = field(default_factory=dict)
     file_occurrences: Dict[str, List[SymbolOccurrence]] = field(default_factory=dict)
+    file_references: Dict[str, List[ParsedReference]] = field(default_factory=dict)
 
     def build_lookup_tables(self) -> None:
         """Populate convenience indexes after parsing."""
@@ -120,6 +139,9 @@ class ParsedIndex:
 
         for sym in self.external_symbols:
             self.symbol_table[sym.symbol_id] = sym
+
+        # Build references after symbol/occurrence tables exist.
+        self.file_references = _build_references(self.documents)
 
     def symbols_in_range(
         self, file_path: str, start_line: int, end_line: int
@@ -145,6 +167,10 @@ class ParsedIndex:
             for occ in self.file_occurrences.get(file_path, [])
             if not (occ.end_line < start_line or occ.start_line >= end_line)
         ]
+
+    def references_in_file(self, file_path: str) -> List[ParsedReference]:
+        """Return all resolved references for ``file_path``."""
+        return self.file_references.get(file_path, [])
 
 
 # ── Protobuf → dataclass conversion ─────────────────────────────────
@@ -391,6 +417,95 @@ def _parse_document(pb2, doc) -> ParsedDocument:
         symbols=[_parse_symbol(pb2, s) for s in doc.symbols],
         text=doc.text,
     )
+
+
+# ── Reference extraction ──────────────────────────────────────────────
+
+
+def _line_snippet(text: str, line_no: int) -> str:
+    """Return a trimmed single-line snippet for ``line_no`` (0-indexed)."""
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if line_no < 0 or line_no >= len(lines):
+        return ""
+    return lines[line_no].strip()[:220]
+
+
+def _resolve_enclosing_symbol(
+    occurrence: SymbolOccurrence,
+    definitions: List[SymbolOccurrence],
+) -> str:
+    """
+    Best-effort enclosing symbol resolution for a usage occurrence.
+
+    Strategy:
+      1) Prefer SCIP-provided enclosing range when available.
+      2) Fallback to nearest containing definition range.
+      3) Return empty string when unresolved.
+    """
+    candidates: List[SymbolOccurrence] = []
+
+    if (
+        occurrence.enclosing_start_line is not None
+        and occurrence.enclosing_end_line is not None
+    ):
+        start = occurrence.enclosing_start_line
+        end = occurrence.enclosing_end_line
+        candidates = [
+            d for d in definitions
+            if d.start_line >= start and d.end_line <= end
+        ]
+
+    if not candidates:
+        line = occurrence.start_line
+        candidates = [
+            d for d in definitions
+            if d.start_line <= line <= d.end_line
+        ]
+
+    if not candidates:
+        return ""
+
+    # Pick the tightest enclosing definition (smallest span).
+    chosen = sorted(
+        candidates,
+        key=lambda d: (d.end_line - d.start_line, d.start_line),
+    )[0]
+    return chosen.symbol
+
+
+def _build_references(documents: List[ParsedDocument]) -> Dict[str, List[ParsedReference]]:
+    """Extract per-file references from SCIP occurrences."""
+    by_file: Dict[str, List[ParsedReference]] = {}
+
+    for doc in documents:
+        defs = [o for o in doc.occurrences if o.is_definition]
+        refs: List[ParsedReference] = []
+
+        for occ in doc.occurrences:
+            # We only record usages, not definitions.
+            if occ.is_definition:
+                continue
+
+            from_symbol = _resolve_enclosing_symbol(occ, defs)
+            ref_kind = "import" if occ.is_import else "reference"
+
+            refs.append(
+                ParsedReference(
+                    from_symbol_id=from_symbol,
+                    to_symbol_id=occ.symbol,
+                    file_path=doc.relative_path,
+                    line=occ.start_line,
+                    col=occ.start_char,
+                    reference_kind=ref_kind,
+                    snippet=_line_snippet(doc.text, occ.start_line),
+                )
+            )
+
+        by_file[doc.relative_path] = refs
+
+    return by_file
 
 
 # ── Public API ───────────────────────────────────────────────────────
